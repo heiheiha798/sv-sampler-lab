@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/MySolver.dir/main.cpp.o"
-  "CMakeFiles/MySolver.dir/main.cpp.o.d"
+  "CMakeFiles/MySolver.dir/src/json_v_converter.cpp.o"
+  "CMakeFiles/MySolver.dir/src/json_v_converter.cpp.o.d"
   "MySolver"
   "MySolver.pdb"
 )

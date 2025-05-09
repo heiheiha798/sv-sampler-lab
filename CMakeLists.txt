@@ -66,7 +66,7 @@ endif()
 # add_executable 命令定义了一个名为 MySolver 的可执行目标，
 # 并指定 src/main.cpp (以及此处列出的任何其他 .cpp 文件) 作为其源文件。
 # C/C++ 编译器和链接器随后会在这些源文件中查找 main() 函数作为程序的入口点。
-add_executable(MySolver src/main.cpp)
+add_executable(MySolver src/json_v_converter.cpp)
 
 # 链接库
 target_link_libraries(MySolver PRIVATE nlohmann_json::nlohmann_json)

@@ -129,29 +129,29 @@ MySolver/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/build
 .PHONY : MySolver/fast
 
-main.o: main.cpp.o
-.PHONY : main.o
+src/json_v_converter.o: src/json_v_converter.cpp.o
+.PHONY : src/json_v_converter.o
 
 # target to build an object file
-main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/main.cpp.o
-.PHONY : main.cpp.o
+src/json_v_converter.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/src/json_v_converter.cpp.o
+.PHONY : src/json_v_converter.cpp.o
 
-main.i: main.cpp.i
-.PHONY : main.i
+src/json_v_converter.i: src/json_v_converter.cpp.i
+.PHONY : src/json_v_converter.i
 
 # target to preprocess a source file
-main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/main.cpp.i
-.PHONY : main.cpp.i
+src/json_v_converter.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/src/json_v_converter.cpp.i
+.PHONY : src/json_v_converter.cpp.i
 
-main.s: main.cpp.s
-.PHONY : main.s
+src/json_v_converter.s: src/json_v_converter.cpp.s
+.PHONY : src/json_v_converter.s
 
 # target to generate assembly for a file
-main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/main.cpp.s
-.PHONY : main.cpp.s
+src/json_v_converter.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/MySolver.dir/build.make CMakeFiles/MySolver.dir/src/json_v_converter.cpp.s
+.PHONY : src/json_v_converter.cpp.s
 
 # Help Target
 help:
@@ -162,9 +162,9 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... MySolver"
-	@echo "... main.o"
-	@echo "... main.i"
-	@echo "... main.s"
+	@echo "... src/json_v_converter.o"
+	@echo "... src/json_v_converter.i"
+	@echo "... src/json_v_converter.s"
 .PHONY : help
 
 

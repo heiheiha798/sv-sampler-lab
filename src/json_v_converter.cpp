@@ -153,11 +153,8 @@ int json_v_converter(string input_json_path, string output_v_dir)
     {
         // eg:      assign cnstr0 = ~var0 + var1;
         //          assign cnstr0_redor = |cnstr0;
-        string line1 = "    assign cnstr" + to_string(num_cnstr) + " = ";
-        line1 += expression_tree(cnstr);
-        line1 += ";";
-
-        string line2 = "    assign cnstr" + to_string(num_cnstr) + "redor = |cnstr" + to_string(num_cnstr) + ";";
+        string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
+        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + expression_tree(cnstr) + ");";
 
         v_lines.push_back(line1);
         v_lines.push_back(line2);
@@ -165,15 +162,96 @@ int json_v_converter(string input_json_path, string output_v_dir)
     }
 
     // 特殊约束：分母不为零
-    for (string cnstr : special_cnstrs){
-        string line1 = "    assign cnstr" + to_string(num_cnstr) + " = " + cnstr + ";";
-        string line2 = "    assign cnstr" + to_string(num_cnstr) + "redor = |cnstr" + to_string(num_cnstr) + ";";
+    for (string cnstr : special_cnstrs)
+    {
+        string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
+        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + cnstr + ");";
         v_lines.push_back(line1);
         v_lines.push_back(line2);
         num_cnstr++;
     }
 
     // 结果输出
+    string result_assign = "    assign result = ";
+    for (int i = 0; i < num_cnstr; i++)
+    {
+        result_assign += "cnstr" + to_string(i) + "_redor";
+        if (i == num_cnstr - 1)
+            result_assign += ";";
+        else
+            result_assign += " & ";
+    }
+
+    v_lines.push_back(result_assign);
     v_lines.push_back("endmodule");
+
+    // 文件名处理和写入
+    string parent_dir_name;
+    string filename_no_ext;
+
+    size_t last_slash_pos = input_json_path.find_last_of("/\\");
+    string filename_with_ext = (last_slash_pos == string::npos) ? input_json_path : input_json_path.substr(last_slash_pos + 1);
+
+    size_t last_dot_pos = filename_with_ext.find_last_of('.');
+    if (string::npos != last_dot_pos)
+    {
+        filename_no_ext = filename_with_ext.substr(0, last_dot_pos);
+    }
+    else
+    {
+        filename_no_ext = filename_with_ext;
+    }
+
+    if (last_slash_pos != string::npos)
+    {
+        size_t second_last_slash_pos = input_json_path.find_last_of("/\\", last_slash_pos - 1);
+        if (second_last_slash_pos != string::npos)
+        {
+            parent_dir_name = input_json_path.substr(second_last_slash_pos + 1, last_slash_pos - (second_last_slash_pos + 1));
+        }
+        else
+        {
+            if (last_slash_pos > 0)
+            {
+                parent_dir_name = input_json_path.substr(0, last_slash_pos);
+            }
+        }
+        if (parent_dir_name.empty() || parent_dir_name == "." || parent_dir_name == ".." || parent_dir_name.find_first_of("/\\") != string::npos)
+        {
+            parent_dir_name.clear();
+        }
+    }
+
+    string test_id;
+    if (!parent_dir_name.empty())
+    {
+        test_id = parent_dir_name + "_" + filename_no_ext;
+    }
+    else
+    {
+        test_id = filename_no_ext;
+    }
+
+    string output_v_filename = output_v_dir;
+    if (!output_v_dir.empty() && output_v_dir.back() != '/' && output_v_dir.back() != '\\')
+    {
+        output_v_filename += "/";
+    }
+    output_v_filename += test_id + ".v";
+
+    ofstream output_v_stream(output_v_filename);
+
+    for (const string &line : v_lines)
+    {
+        output_v_stream << line << endl;
+    }
+    output_v_stream.close();
+    return 0;
+}
+
+int main(){
+    string in = "/root/sv-sampler-lab/opt1/0.json";
+    string out = "/root/sv-sampler-lab/src/generated_files";
+    int convert = json_v_converter(in, out);
     return 0;
 }
