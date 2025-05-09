@@ -63,7 +63,7 @@ string expression_tree(const json &node)
     else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" || type == "MOD" ||
              type == "LSHIFT" || type == "RSHIFT" ||
              type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" || type == "LOG_AND" || type == "LOG_OR" ||
-             type == "EQ" || type == "NE" || type == "LT" || type == "LE" || type == "GT" || type == "GE")
+             type == "EQ" || type == "NEQ" || type == "LT" || type == "LE" || type == "GT" || type == "GE")
     {
         string lhs = expression_tree(node["lhs_expression"]);
         string rhs = expression_tree(node["rhs_expression"]);
@@ -99,7 +99,7 @@ string expression_tree(const json &node)
             op_symbol = "||";
         else if (type == "EQ")
             op_symbol = "==";
-        else if (type == "NE")
+        else if (type == "NEQ")
             op_symbol = "!=";
         else if (type == "LT")
             op_symbol = "<";
@@ -249,7 +249,8 @@ int json_v_converter(string input_json_path, string output_v_dir)
     return 0;
 }
 
-int main(){
+int main()
+{
     string in = "/root/sv-sampler-lab/opt1/0.json";
     string out = "/root/sv-sampler-lab/src/generated_files";
     int convert = json_v_converter(in, out);
