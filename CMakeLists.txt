@@ -27,12 +27,12 @@ else()
     find_path(CUDD_INCLUDE_DIR cudd.h
               HINTS ENV CUDD_DIR /usr/local /usr
               PATH_SUFFIXES include include/cudd) # cudd.h 可能在 include/ 或 include/cudd/
-    find_library(CUDD_LIBRARY NAMES cudd
+    find_library(CUDD_LIBRARY NAMES cudd.a cudd
                  HINTS ENV CUDD_DIR /usr/local /usr
                  PATH_SUFFIXES lib lib64)
 
     if(CUDD_INCLUDE_DIR AND CUDD_LIBRARY)
-        add_library(CUDD::cudd UNKNOWN IMPORTED)
+        add_library(CUDD::cudd STATIC IMPORTED)
         set_target_properties(CUDD::cudd PROPERTIES
                               IMPORTED_LOCATION "${CUDD_LIBRARY}"
                               INTERFACE_INCLUDE_DIRECTORIES "${CUDD_INCLUDE_DIR}")
