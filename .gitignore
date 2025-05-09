@@ -1,1 +1,14 @@
 /build/
+*.o
+*.d
+*.a
+*.so
+*.lo
+*.la
+*.lai
+*.log
+result.json
+*.v
+*.aig
+*~
+.*.swp
