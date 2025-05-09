@@ -120,3 +120,7 @@
   - `yosys -q -p "read_verilog cnstr.sv; synth; aigmap; writer_aiger cnstr.aig;"` 可以在非交互式情况下执行一串指令（`-q`会阻止额外信息被打印，如果想看到细节可以去掉 `-q`）
 - [AIG格式描述](https://github.com/arminbiere/aiger/blob/master/FORMAT)
 - [nlohmann::json文档](https://github.com/nlohmann/json?tab=readme-ov-file#read-json-from-a-file)
+
+
+bash build.sh
+./run.sh /root/sv-sampler-lab/opt1/0.json 10 ./outputs 12345

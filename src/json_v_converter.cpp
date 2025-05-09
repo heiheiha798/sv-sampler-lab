@@ -249,10 +249,30 @@ int json_v_converter(string input_json_path, string output_v_dir)
     return 0;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-    string in = "/root/sv-sampler-lab/opt1/0.json";
-    string out = "/root/sv-sampler-lab/src/generated_files";
-    int convert = json_v_converter(in, out);
-    return 0;
+    if (argc != 5)
+    {
+        cerr << "Usage: " << argv[0] << " [constraint.json] [num_samples] [run_dir] [random_seed]" << endl;
+        return 1; // 返回非零值表示错误
+    }
+
+    string input_json_path = argv[1]; // 第一个参数：constraint.json 文件的路径
+    // string num_samples_str = argv[2]; // 第二个参数：num_samples，当前函数不需要直接使用
+    string output_v_dir = argv[3]; // 第三个参数：run_dir，生成的 .v 文件的输出目录
+    // string random_seed_str = argv[4]; // 第四个参数：random_seed，当前函数不需要直接使用
+
+    // 在这里，您可以添加一个检查，确保 output_v_dir 目录存在。
+    // 注意：run.sh 已经使用 mkdir -p 创建了它，所以此处可以省略，除非您想双重保险。
+    // 如果要添加，可能需要 <filesystem> 或 system("mkdir -p ...")
+    /*
+    if (!std::filesystem::exists(output_v_dir)) {
+        std::filesystem::create_directories(output_v_dir);
+    }
+    */
+
+    // 调用核心转换函数，并传递命令行参数获取的路径
+    int convert_result = json_v_converter(input_json_path, output_v_dir);
+
+    return convert_result; // 返回转换结果
 }

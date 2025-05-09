@@ -1,4 +1,5 @@
 /build/
+outputs/
 src/generated_files/
 *.o
 *.d
