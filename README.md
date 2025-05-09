@@ -124,3 +124,5 @@
 
 bash build.sh
 ./run.sh /root/sv-sampler-lab/opt1/0.json 10 ./outputs 12345
+./run.sh /root/sv-sampler-lab/opt1/1.json 10 ./outputs 12345
+./evaluate.sh basic

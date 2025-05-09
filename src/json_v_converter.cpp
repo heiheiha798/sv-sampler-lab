@@ -3,9 +3,12 @@
 #include <string>
 #include <vector>
 #include "nlohmann/json.hpp"
+#include "solver_functions.h" // 包含 aig_to_bdd_solver 的声明 (虽然 json_v_converter 不直接使用，但为了项目结构保留)
+#include <filesystem>
 
 using json = nlohmann::json;
 using namespace std;
+using namespace std::filesystem;
 
 // 本文件实现功能：将input_json_path的json格式文件输入
 // 转化成verilog代码，输出.v文件到output_v_dir，以便后续yosys处理
@@ -31,7 +34,7 @@ string expression_tree(const json &node)
     else if (type == "BIT_NEG" || type == "LOG_NEG" ||
              type == "RED_AND" || type == "RED_OR" || type == "RED_XOR" ||
              type == "RED_NAND" || type == "RED_NOR" || type == "RED_XNOR" ||
-             type == "UNARY_PLUS" || type == "UNARY_MINUS")
+             type == "UNARY_PLUS" || type == "UNARY_MINUS" || type == "MINUS")
     {
         string lhs = expression_tree(node["lhs_expression"]);
         string op_symbol;
@@ -53,7 +56,7 @@ string expression_tree(const json &node)
             op_symbol = "~^";
         else if (type == "UNARY_PLUS")
             op_symbol = "+";
-        else if (type == "UNARY_MINUS")
+        else if (type == "UNARY_MINUS" || type == "MINUS")
             op_symbol = "-";
 
         return op_symbol + "(" + lhs + ")";
@@ -63,7 +66,7 @@ string expression_tree(const json &node)
     else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" || type == "MOD" ||
              type == "LSHIFT" || type == "RSHIFT" ||
              type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" || type == "LOG_AND" || type == "LOG_OR" ||
-             type == "EQ" || type == "NEQ" || type == "LT" || type == "LE" || type == "GT" || type == "GE")
+             type == "EQ" || type == "NEQ" || type == "LT" || type == "LE" || type == "GT" || type == "GE" || type == "IMPLY")
     {
         string lhs = expression_tree(node["lhs_expression"]);
         string rhs = expression_tree(node["rhs_expression"]);
@@ -72,59 +75,86 @@ string expression_tree(const json &node)
         if (type == "DIV" || type == "MOD")
             special_cnstrs.push_back(rhs);
 
-        string op_symbol;
-        if (type == "ADD")
-            op_symbol = "+";
-        else if (type == "SUB")
-            op_symbol = "-";
-        else if (type == "MUL")
-            op_symbol = "*";
-        else if (type == "DIV")
-            op_symbol = "/";
-        else if (type == "MOD")
-            op_symbol = "%";
-        else if (type == "LSHIFT")
-            op_symbol = "<<";
-        else if (type == "RSHIFT")
-            op_symbol = ">>";
-        else if (type == "BIT_AND")
-            op_symbol = "&";
-        else if (type == "BIT_OR")
-            op_symbol = "|";
-        else if (type == "BIT_XOR")
-            op_symbol = "^";
-        else if (type == "LOG_AND")
-            op_symbol = "&&";
-        else if (type == "LOG_OR")
-            op_symbol = "||";
-        else if (type == "EQ")
-            op_symbol = "==";
-        else if (type == "NEQ")
-            op_symbol = "!=";
-        else if (type == "LT")
-            op_symbol = "<";
-        else if (type == "LE")
-            op_symbol = "<=";
-        else if (type == "GT")
-            op_symbol = ">";
-        else if (type == "GE")
-            op_symbol = ">=";
-
-        return "(" + lhs + " " + op_symbol + " " + rhs + ")";
+        if (type == "IMPLY")
+            return "( (!(" + lhs + ")) || (" + rhs + ") )";
+        else
+        {
+            string op_symbol;
+            if (type == "ADD")
+                op_symbol = "+";
+            else if (type == "SUB")
+                op_symbol = "-";
+            else if (type == "MUL")
+                op_symbol = "*";
+            else if (type == "DIV")
+                op_symbol = "/";
+            else if (type == "MOD")
+                op_symbol = "%";
+            else if (type == "LSHIFT")
+                op_symbol = "<<";
+            else if (type == "RSHIFT")
+                op_symbol = ">>";
+            else if (type == "BIT_AND")
+                op_symbol = "&";
+            else if (type == "BIT_OR")
+                op_symbol = "|";
+            else if (type == "BIT_XOR")
+                op_symbol = "^";
+            else if (type == "LOG_AND")
+                op_symbol = "&&";
+            else if (type == "LOG_OR")
+                op_symbol = "||";
+            else if (type == "EQ")
+                op_symbol = "==";
+            else if (type == "NEQ")
+                op_symbol = "!=";
+            else if (type == "LT")
+                op_symbol = "<";
+            else if (type == "LE")
+                op_symbol = "<=";
+            else if (type == "GT")
+                op_symbol = ">";
+            else if (type == "GE")
+                op_symbol = ">=";
+            return "(" + lhs + " " + op_symbol + " " + rhs + ")";
+        }
     }
 
     return "";
 }
 
-// 核心模块
-int json_v_converter(string input_json_path, string output_v_dir)
+// 核心模块：JSON 到 Verilog 转换
+int json_v_converter(const string &input_json_path, const string &output_v_dir)
 {
+    // 清空 special_cnstrs，确保每次调用都是新的状态
+    special_cnstrs.clear();
 
     // 读取输入至data
     json data;
     ifstream input_json_stream(input_json_path);
-    input_json_stream >> data;
+    if (!input_json_stream.is_open())
+    {
+        cerr << "Error: Could not open input JSON file: " << input_json_path << endl;
+        return 1;
+    }
+    try
+    {
+        input_json_stream >> data;
+    }
+    catch (const json::parse_error &e)
+    {
+        cerr << "Error: JSON parse error: " << e.what() << " in file " << input_json_path << endl;
+        return 1;
+    }
     input_json_stream.close();
+
+    // 检查必要的字段是否存在
+    if (!data.contains("variable_list") || !data["variable_list"].is_array() ||
+        !data.contains("constraint_list") || !data["constraint_list"].is_array())
+    {
+        cerr << "Error: Invalid JSON format. Missing 'variable_list' or 'constraint_list'." << endl;
+        return 1;
+    }
 
     // 需要构建的.v文件
     vector<string> v_lines;
@@ -139,7 +169,13 @@ int json_v_converter(string input_json_path, string output_v_dir)
     v_lines.push_back("module from_json(");
     for (const auto &var : variable_list)
     {
-        // eg:     input wire [6:0] var0,
+        // eg:     input wire [6:0] var0,
+        if (!var.contains("name") || !var["name"].is_string() ||
+            !var.contains("bit_width") || !var["bit_width"].is_number())
+        {
+            cerr << "Warning: Skipping malformed variable entry in JSON." << endl;
+            continue;
+        }
         string name = var.value("name", "default_name");
         int bit_width = var.value("bit_width", 1);
         v_lines.push_back("    input wire [" + to_string(bit_width - 1) + ":0] " + name + ",");
@@ -165,7 +201,8 @@ int json_v_converter(string input_json_path, string output_v_dir)
     for (string cnstr : special_cnstrs)
     {
         string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
-        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + cnstr + ");";
+        // 分母不为零的约束是表达式本身不等于0
+        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + cnstr + " != 0);";
         v_lines.push_back(line1);
         v_lines.push_back(line2);
         num_cnstr++;
@@ -173,57 +210,33 @@ int json_v_converter(string input_json_path, string output_v_dir)
 
     // 结果输出
     string result_assign = "    assign result = ";
-    for (int i = 0; i < num_cnstr; i++)
+    if (num_cnstr == 0)
     {
-        result_assign += "cnstr" + to_string(i) + "_redor";
-        if (i == num_cnstr - 1)
-            result_assign += ";";
-        else
-            result_assign += " & ";
+        // 如果没有约束，结果始终为真 (1'b1)
+        result_assign += "1'b1;";
+    }
+    else
+    {
+        for (int i = 0; i < num_cnstr; i++)
+        {
+            result_assign += "cnstr" + to_string(i) + "_redor";
+            if (i == num_cnstr - 1)
+                result_assign += ";";
+            else
+                result_assign += " & ";
+        }
     }
 
     v_lines.push_back(result_assign);
     v_lines.push_back("endmodule");
 
     // 文件名处理和写入
-    string parent_dir_name;
-    string filename_no_ext;
-
-    size_t last_slash_pos = input_json_path.find_last_of("/\\");
-    string filename_with_ext = (last_slash_pos == string::npos) ? input_json_path : input_json_path.substr(last_slash_pos + 1);
-
-    size_t last_dot_pos = filename_with_ext.find_last_of('.');
-    if (string::npos != last_dot_pos)
-    {
-        filename_no_ext = filename_with_ext.substr(0, last_dot_pos);
-    }
-    else
-    {
-        filename_no_ext = filename_with_ext;
-    }
-
-    if (last_slash_pos != string::npos)
-    {
-        size_t second_last_slash_pos = input_json_path.find_last_of("/\\", last_slash_pos - 1);
-        if (second_last_slash_pos != string::npos)
-        {
-            parent_dir_name = input_json_path.substr(second_last_slash_pos + 1, last_slash_pos - (second_last_slash_pos + 1));
-        }
-        else
-        {
-            if (last_slash_pos > 0)
-            {
-                parent_dir_name = input_json_path.substr(0, last_slash_pos);
-            }
-        }
-        if (parent_dir_name.empty() || parent_dir_name == "." || parent_dir_name == ".." || parent_dir_name.find_first_of("/\\") != string::npos)
-        {
-            parent_dir_name.clear();
-        }
-    }
+    filesystem::path input_json_path_obj(input_json_path);
+    string filename_no_ext = input_json_path_obj.stem().string();
+    string parent_dir_name = input_json_path_obj.parent_path().filename().string();
 
     string test_id;
-    if (!parent_dir_name.empty())
+    if (!parent_dir_name.empty() && parent_dir_name != "." && parent_dir_name != "/")
     {
         test_id = parent_dir_name + "_" + filename_no_ext;
     }
@@ -232,47 +245,25 @@ int json_v_converter(string input_json_path, string output_v_dir)
         test_id = filename_no_ext;
     }
 
-    string output_v_filename = output_v_dir;
-    if (!output_v_dir.empty() && output_v_dir.back() != '/' && output_v_dir.back() != '\\')
-    {
-        output_v_filename += "/";
-    }
-    output_v_filename += test_id + ".v";
+    filesystem::path output_v_path = filesystem::path(output_v_dir) / (test_id + ".v");
 
-    ofstream output_v_stream(output_v_filename);
+    ofstream output_v_stream(output_v_path);
+
+    if (!output_v_stream.is_open())
+    {
+        cerr << "Error: Could not open output Verilog file: " << output_v_path << endl;
+        return 1;
+    }
 
     for (const string &line : v_lines)
     {
         output_v_stream << line << endl;
     }
     output_v_stream.close();
+
+    cout << "Verilog file generated successfully: " << output_v_path << endl;
+
     return 0;
 }
 
-int main(int argc, char *argv[])
-{
-    if (argc != 5)
-    {
-        cerr << "Usage: " << argv[0] << " [constraint.json] [num_samples] [run_dir] [random_seed]" << endl;
-        return 1; // 返回非零值表示错误
-    }
-
-    string input_json_path = argv[1]; // 第一个参数：constraint.json 文件的路径
-    // string num_samples_str = argv[2]; // 第二个参数：num_samples，当前函数不需要直接使用
-    string output_v_dir = argv[3]; // 第三个参数：run_dir，生成的 .v 文件的输出目录
-    // string random_seed_str = argv[4]; // 第四个参数：random_seed，当前函数不需要直接使用
-
-    // 在这里，您可以添加一个检查，确保 output_v_dir 目录存在。
-    // 注意：run.sh 已经使用 mkdir -p 创建了它，所以此处可以省略，除非您想双重保险。
-    // 如果要添加，可能需要 <filesystem> 或 system("mkdir -p ...")
-    /*
-    if (!std::filesystem::exists(output_v_dir)) {
-        std::filesystem::create_directories(output_v_dir);
-    }
-    */
-
-    // 调用核心转换函数，并传递命令行参数获取的路径
-    int convert_result = json_v_converter(input_json_path, output_v_dir);
-
-    return convert_result; // 返回转换结果
-}
+// 注意：原有的 main 函数已移除，现在 main 函数位于单独的 main.cpp 文件中。
