@@ -122,7 +122,11 @@
 - [nlohmann::json文档](https://github.com/nlohmann/json?tab=readme-ov-file#read-json-from-a-file)
 
 
-bash build.sh \\
-./run.sh /root/sv-sampler-lab/opt1/0.json 10 ./outputs 12345 \\
-./run.sh /root/sv-sampler-lab/opt1/1.json 10 ./outputs 12345 \\
-./evaluate.sh basic \\
+bash build.sh 
+
+./run.sh /root/sv-sampler-lab/opt1/0.json 10 ./outputs 12345
+
+./run.sh /root/sv-sampler-lab/opt1/1.json 10 ./outputs 12345
+
+./evaluate.sh basic
+
