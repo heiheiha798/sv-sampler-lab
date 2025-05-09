@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/MySolver.dir/main.cpp.o -o MySolver  -Wl,-rpath,/usr/local/lib /usr/local/lib/libcudd.so 
