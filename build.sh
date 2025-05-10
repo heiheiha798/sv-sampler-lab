@@ -15,6 +15,7 @@ sudo apt install -y \
     clang \
     flex bison \
     libreadline-dev \
+    libboost-all-dev \
     gawk\
     automake\
     autoconf\
