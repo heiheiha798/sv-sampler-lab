@@ -56,7 +56,7 @@ string expression_tree(const json &node)
             op_symbol = "~^";
         else if (type == "UNARY_PLUS")
             op_symbol = "+";
-        else if (type == "UNARY_MINUS" || type == "MINUS")
+        else if (type == "MINUS")
             op_symbol = "-";
 
         return op_symbol + "(" + lhs + ")";
