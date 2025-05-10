@@ -334,7 +334,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
     } else if (bdd_circuit_output == Cudd_ReadOne(manager) &&
                nI > 0) { /* ... */
     }
-    // ... (rest of constant BDD output checks)
 
     for (int i = 0; i < num_samples; ++i) {
         DdNode *minterm_node = nullptr;
@@ -360,13 +359,12 @@ int aig_to_bdd_solver(const string &aig_file_path,
                // to input_vars_array_for_sampling
 
         for (const auto &var_info : original_variable_list) {
-            // ... (variable info parsing as before)
             int bit_width = var_info.value("bit_width", 1);
             unsigned long long variable_combined_value = 0;
 
             for (int bit_k = 0; bit_k < bit_width;
                  ++bit_k) { // bit_k is bit within the multi-bit variable
-                if (current_bit_idx_overall >= nI) { /* Error handling ... */
+                if (current_bit_idx_overall >= nI) {
                     Cudd_Quit(manager);
                     return 1;
                 }
@@ -377,19 +375,12 @@ int aig_to_bdd_solver(const string &aig_file_path,
 
                 // Logic to extract assignment for current_single_bit_var_bdd
                 // from minterm_node
-                if (minterm_node !=
-                    Cudd_ReadOne(manager)) { // If not a tautology where minterm
-                                             // is just ONE
+                if (minterm_node != Cudd_ReadOne(manager)) {
                     DdNode *temp_check_one = Cudd_bddAnd(
                         manager, minterm_node, current_single_bit_var_bdd);
                     Cudd_Ref(temp_check_one);
                     if (temp_check_one == minterm_node) {
                         bit_assignment = 1;
-                    } else {
-                        // Check for var = 0 might be needed if var is don't
-                        // care in minterm, but Cudd_bddPickOneMinterm should
-                        // return a full cube. Assuming var must be in minterm
-                        // if nI > 0.
                     }
                     Cudd_RecursiveDeref(manager, temp_check_one);
                 } else if (nI > 0) {
@@ -443,15 +434,12 @@ int aig_to_bdd_solver(const string &aig_file_path,
                             //      << Cudd_ReadIndex(manager,
                             //      current_single_bit_var_bdd)
                             //      << ") in minterm. Defaulting to 0." << endl;
-                            bit_assignment = 0; // Default for don't care or if
-                                                // minterm is BDD_ONE
+                            bit_assignment = 0;
                         }
                         Cudd_RecursiveDeref(manager, temp_check_negative);
                     }
                     Cudd_RecursiveDeref(manager, temp_check_positive);
                 }
-                // else if nI == 0, minterm_node is BDD_ONE, loop for var_info
-                // won't run if original_variable_list is empty.
 
                 variable_combined_value |= (bit_assignment << bit_k);
                 current_bit_idx_overall++;
@@ -459,7 +447,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
             assignment_entry.push_back(
                 {{"value", to_hex_string(variable_combined_value, bit_width)}});
         }
-        // ... (rest of sampling loop, list push_back, Deref minterm_node)
         assignment_list.push_back(assignment_entry);
         if (minterm_node != Cudd_ReadOne(manager) || nI > 0) {
             Cudd_RecursiveDeref(manager, minterm_node);
@@ -469,11 +456,10 @@ int aig_to_bdd_solver(const string &aig_file_path,
     if (input_vars_array_for_sampling) {
         delete[] input_vars_array_for_sampling;
     }
-    // ... (JSON output writing)
 
     result_json["assignment_list"] = assignment_list;
     std::ofstream output_json_stream(result_json_path);
-    if (!output_json_stream.is_open()) { /* ... error ... */
+    if (!output_json_stream.is_open()) {
         Cudd_Quit(manager);
         return 1;
     }
@@ -541,33 +527,20 @@ string to_hex_string(unsigned long long value, int bit_width) {
 
 // --- NEW HELPER FUNCTION IMPLEMENTATION for variable ordering ---
 static std::vector<int> determine_bdd_variable_order(
-    int nI_total, // Total number of primary inputs
-    const std::vector<int>
-        &aig_primary_input_literals, // All PI literals from AIG file (e.g., 2,
-                                     // 4, 6)
-    const std::vector<int>
-        &circuit_output_literals_from_aig, // AIG output literals (e.g., one
-                                           // literal for single-output)
-    const std::map<int, std::pair<int, int>>
-        &and_gate_definitions // AIG AND gates: LHS_lit -> {RHS1_lit, RHS2_lit}
-) {
+    int nI_total, const std::vector<int> &aig_primary_input_literals,
+    const std::vector<int> &circuit_output_literals_from_aig,
+    const std::map<int, std::pair<int, int>> &and_gate_definitions) {
     cout << "Debug: Determining BDD variable order..." << endl;
     std::vector<int> ordered_pis_for_bdd_creation;
-    std::set<int>
-        visited_nodes_for_ordering_dfs; // Stores positive literals visited
-    std::set<int> added_pis_to_order;   // Stores positive PI literals already
-                                      // added to 'ordered_pis_for_bdd_creation'
-
-    // Convert aig_primary_input_literals to a set for quick lookup
+    std::set<int> visited_nodes_for_ordering_dfs;
+    std::set<int> added_pis_to_order;
     std::set<int> primary_input_set;
     for (int pi_lit : aig_primary_input_literals) {
-        primary_input_set.insert(
-            pi_lit); // These are already positive and even by AIG convention
+        primary_input_set.insert(pi_lit);
     }
 
     std::function<void(int)> order_dfs = [&](int current_node_literal) {
-        int regular_node_lit = (current_node_literal / 2) *
-                               2; // Get the variable's positive literal
+        int regular_node_lit = (current_node_literal / 2) * 2;
 
         if (visited_nodes_for_ordering_dfs.count(regular_node_lit)) {
             return;
@@ -588,15 +561,9 @@ static std::vector<int> determine_bdd_variable_order(
         auto it = and_gate_definitions.find(regular_node_lit);
         if (it != and_gate_definitions.end()) {
             const auto &inputs = it->second;
-            // Recurse on the inputs of the AND gate
-            // The order of recursion (input1 then input2, or vice-versa) can be
-            // a minor heuristic itself. For now, just process as given.
             order_dfs(inputs.first);  // RHS1
             order_dfs(inputs.second); // RHS2
         }
-        // If it's not a PI and not an AND gate output we know about, it's an
-        // issue or a constant (0/1) Constants 0 (lit 0) and 1 (lit 1) are not
-        // recursed upon from here.
     };
 
     // Start DFS from each primary output of the circuit
@@ -628,25 +595,10 @@ static std::vector<int> determine_bdd_variable_order(
         for (int pi_lit : aig_primary_input_literals) {
             if (added_pis_to_order.find(pi_lit) == added_pis_to_order.end()) {
                 ordered_pis_for_bdd_creation.push_back(pi_lit);
-                added_pis_to_order.insert(pi_lit); // Should already be covered
-                                                   // by find, but for clarity
-                cout << "Debug: Appending unreached PI to order: " << pi_lit
-                     << endl;
+                added_pis_to_order.insert(pi_lit);
             }
         }
     }
-
-    if (ordered_pis_for_bdd_creation.size() != nI_total) {
-        cerr << "Warning: Determined PI order size ("
-             << ordered_pis_for_bdd_creation.size() << ") does not match nI ("
-             << nI_total
-             << "). Some PIs might be missing or duplicated in ordering logic."
-             << endl;
-    }
-
-    cout << "Debug: BDD variable order determined. Number of variables in "
-            "order: "
-         << ordered_pis_for_bdd_creation.size() << endl;
 
     return ordered_pis_for_bdd_creation;
 }
