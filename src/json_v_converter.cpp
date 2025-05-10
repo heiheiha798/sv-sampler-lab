@@ -1,10 +1,10 @@
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
 #include "nlohmann/json.hpp"
 #include "solver_functions.h" // 包含 aig_to_bdd_solver 的声明 (虽然 json_v_converter 不直接使用，但为了项目结构保留)
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
 
 using json = nlohmann::json;
 using namespace std;
@@ -15,26 +15,21 @@ using namespace std::filesystem;
 
 // 用于递归提取json中的约束
 vector<string> special_cnstrs; // 储存分母不能为零导致的约束的表达式
-string expression_tree(const json &node)
-{
+string expression_tree(const json &node) {
     string type = node["op"];
 
     // 变量或定值
-    if (type == "VAR")
-    {
+    if (type == "VAR") {
         int id = node.value("id", 0);
         return string("var_" + to_string(id));
-    }
-    else if (type == "CONST")
-    {
+    } else if (type == "CONST") {
         return node.value("value", "1'b0");
     }
 
     // 一元运算
     // 根据 op_detector 结果，保留: BIT_NEG, LOG_NEG, MINUS (作为一元负号)
     // 移除了 RED_AND, RED_OR, RED_XOR, RED_NAND, RED_NOR, RED_XNOR, UNARY_PLUS
-    else if (type == "BIT_NEG" || type == "LOG_NEG" || type == "MINUS")
-    {
+    else if (type == "BIT_NEG" || type == "LOG_NEG" || type == "MINUS") {
         string lhs = expression_tree(node["lhs_expression"]);
         string op_symbol;
         if (type == "BIT_NEG")
@@ -50,12 +45,11 @@ string expression_tree(const json &node)
     // 根据 op_detector 结果，保留: ADD, SUB, MUL, DIV, MOD, LSHIFT, RSHIFT,
     // BIT_AND, BIT_OR, BIT_XOR, LOG_AND, LOG_OR, EQ, NEQ, IMPLY
     // 移除了 LT, LE, GT, GE
-    else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" || type == "MOD" ||
-             type == "LSHIFT" || type == "RSHIFT" ||
+    else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" ||
+             type == "MOD" || type == "LSHIFT" || type == "RSHIFT" ||
              type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" ||
-             type == "LOG_AND" || type == "LOG_OR" ||
-             type == "EQ" || type == "NEQ" || type == "IMPLY")
-    {
+             type == "LOG_AND" || type == "LOG_OR" || type == "EQ" ||
+             type == "NEQ" || type == "IMPLY") {
         string lhs = expression_tree(node["lhs_expression"]);
         string rhs = expression_tree(node["rhs_expression"]);
 
@@ -65,8 +59,7 @@ string expression_tree(const json &node)
 
         if (type == "IMPLY")
             return "( (!(" + lhs + ")) || (" + rhs + ") )";
-        else
-        {
+        else {
             string op_symbol;
             if (type == "ADD")
                 op_symbol = "+";
@@ -102,44 +95,45 @@ string expression_tree(const json &node)
     }
     // 如果 op 类型不在上述任何一个分支中，可以考虑添加一个警告或错误处理
     else {
-        cerr << "Warning: Unhandled or unknown 'op' type encountered in expression_tree: " << type << endl;
+        cerr << "Warning: Unhandled or unknown 'op' type encountered in "
+                "expression_tree: "
+             << type << endl;
         return "/* UNHANDLED_OP: " + type + " */"; // 返回一个表示错误的字符串
     }
 
     return "/* ERROR_IN_EXPRESSION_TREE_LOGIC */";
 }
 
-
 // 核心模块：JSON 到 Verilog 转换
-int json_v_converter(const string &input_json_path, const string &output_v_dir)
-{
+int json_v_converter(const string &input_json_path,
+                     const string &output_v_dir) {
     // 清空 special_cnstrs，确保每次调用都是新的状态
     special_cnstrs.clear();
 
     // 读取输入至data
     json data;
     ifstream input_json_stream(input_json_path);
-    if (!input_json_stream.is_open())
-    {
-        cerr << "Error: Could not open input JSON file: " << input_json_path << endl;
+    if (!input_json_stream.is_open()) {
+        cerr << "Error: Could not open input JSON file: " << input_json_path
+             << endl;
         return 1;
     }
-    try
-    {
+    try {
         input_json_stream >> data;
-    }
-    catch (const json::parse_error &e)
-    {
-        cerr << "Error: JSON parse error: " << e.what() << " in file " << input_json_path << endl;
+    } catch (const json::parse_error &e) {
+        cerr << "Error: JSON parse error: " << e.what() << " in file "
+             << input_json_path << endl;
         return 1;
     }
     input_json_stream.close();
 
     // 检查必要的字段是否存在
     if (!data.contains("variable_list") || !data["variable_list"].is_array() ||
-        !data.contains("constraint_list") || !data["constraint_list"].is_array())
-    {
-        cerr << "Error: Invalid JSON format. Missing 'variable_list' or 'constraint_list'." << endl;
+        !data.contains("constraint_list") ||
+        !data["constraint_list"].is_array()) {
+        cerr << "Error: Invalid JSON format. Missing 'variable_list' or "
+                "'constraint_list'."
+             << endl;
         return 1;
     }
 
@@ -154,30 +148,30 @@ int json_v_converter(const string &input_json_path, const string &output_v_dir)
 
     // 变量声明
     v_lines.push_back("module from_json(");
-    for (const auto &var : variable_list)
-    {
+    for (const auto &var : variable_list) {
         // eg:     input wire [6:0] var0,
         if (!var.contains("name") || !var["name"].is_string() ||
-            !var.contains("bit_width") || !var["bit_width"].is_number())
-        {
-            cerr << "Warning: Skipping malformed variable entry in JSON." << endl;
+            !var.contains("bit_width") || !var["bit_width"].is_number()) {
+            cerr << "Warning: Skipping malformed variable entry in JSON."
+                 << endl;
             continue;
         }
         string name = var.value("name", "default_name");
         int bit_width = var.value("bit_width", 1);
-        v_lines.push_back("    input wire [" + to_string(bit_width - 1) + ":0] " + name + ",");
+        v_lines.push_back("    input wire [" + to_string(bit_width - 1) +
+                          ":0] " + name + ",");
     }
     v_lines.push_back("    output wire result");
     v_lines.push_back(");");
 
     // 普通约束
     int num_cnstr = 0;
-    for (const auto &cnstr : constraint_list)
-    {
+    for (const auto &cnstr : constraint_list) {
         // eg:      assign cnstr0 = ~var0 + var1;
         //          assign cnstr0_redor = |cnstr0;
         string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
-        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + expression_tree(cnstr) + ");";
+        string line2 = "    assign cnstr" + to_string(num_cnstr) +
+                       "_redor = |(" + expression_tree(cnstr) + ");";
 
         v_lines.push_back(line1);
         v_lines.push_back(line2);
@@ -185,11 +179,11 @@ int json_v_converter(const string &input_json_path, const string &output_v_dir)
     }
 
     // 特殊约束：分母不为零
-    for (string cnstr : special_cnstrs)
-    {
+    for (string cnstr : special_cnstrs) {
         string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
         // 分母不为零的约束是表达式本身不等于0
-        string line2 = "    assign cnstr" + to_string(num_cnstr) + "_redor = |(" + cnstr + " != 0);";
+        string line2 = "    assign cnstr" + to_string(num_cnstr) +
+                       "_redor = |(" + cnstr + " != 0);";
         v_lines.push_back(line1);
         v_lines.push_back(line2);
         num_cnstr++;
@@ -197,15 +191,11 @@ int json_v_converter(const string &input_json_path, const string &output_v_dir)
 
     // 结果输出
     string result_assign = "    assign result = ";
-    if (num_cnstr == 0)
-    {
+    if (num_cnstr == 0) {
         // 如果没有约束，结果始终为真 (1'b1)
         result_assign += "1'b1;";
-    }
-    else
-    {
-        for (int i = 0; i < num_cnstr; i++)
-        {
+    } else {
+        for (int i = 0; i < num_cnstr; i++) {
             result_assign += "cnstr" + to_string(i) + "_redor";
             if (i == num_cnstr - 1)
                 result_assign += ";";
@@ -220,30 +210,29 @@ int json_v_converter(const string &input_json_path, const string &output_v_dir)
     // 文件名处理和写入
     filesystem::path input_json_path_obj(input_json_path);
     string filename_no_ext = input_json_path_obj.stem().string();
-    string parent_dir_name = input_json_path_obj.parent_path().filename().string();
+    string parent_dir_name =
+        input_json_path_obj.parent_path().filename().string();
 
     string test_id;
-    if (!parent_dir_name.empty() && parent_dir_name != "." && parent_dir_name != "/")
-    {
+    if (!parent_dir_name.empty() && parent_dir_name != "." &&
+        parent_dir_name != "/") {
         test_id = parent_dir_name + "_" + filename_no_ext;
-    }
-    else
-    {
+    } else {
         test_id = filename_no_ext;
     }
 
-    filesystem::path output_v_path = filesystem::path(output_v_dir) / (test_id + ".v");
+    filesystem::path output_v_path =
+        filesystem::path(output_v_dir) / (test_id + ".v");
 
     ofstream output_v_stream(output_v_path);
 
-    if (!output_v_stream.is_open())
-    {
-        cerr << "Error: Could not open output Verilog file: " << output_v_path << endl;
+    if (!output_v_stream.is_open()) {
+        cerr << "Error: Could not open output Verilog file: " << output_v_path
+             << endl;
         return 1;
     }
 
-    for (const string &line : v_lines)
-    {
+    for (const string &line : v_lines) {
         output_v_stream << line << endl;
     }
     output_v_stream.close();
