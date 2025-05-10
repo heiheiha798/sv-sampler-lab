@@ -1,6 +1,7 @@
 #include "solver_functions.h"
 
 #include <algorithm>
+#include <chrono> // 新增：用于计时
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -39,22 +40,31 @@ int aig_to_bdd_solver(const string &aig_file_path,
                       const string &original_json_path, int num_samples,
                       const string &result_json_path,
                       unsigned int random_seed) {
+    auto function_start_time =
+        std::chrono::high_resolution_clock::now(); // 函数总计时开始
+
     DdManager *manager;
     DdNode *bdd_circuit_output = nullptr;
     int nM = 0, nI = 0, nL = 0, nO = 0, nA = 0;
 
     // 1. 初始化 CUDD 管理器
+    auto cudd_init_start_time = std::chrono::high_resolution_clock::now();
     manager = Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
     if (!manager) {
         cerr << "Error: CUDD manager initialization failed." << endl;
         return 1;
     }
-
     Cudd_AutodynEnable(manager, CUDD_REORDER_SIFT);
     cout << "Debug: Automatic dynamic variable reordering enabled "
             "(CUDD_REORDER_SIFT)."
          << endl;
     Cudd_Srandom(manager, random_seed);
+    auto cudd_init_end_time = std::chrono::high_resolution_clock::now();
+    auto cudd_init_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            cudd_init_end_time - cudd_init_start_time);
+    cout << "LOG: CUDD manager initialization took "
+         << cudd_init_duration.count() << " ms." << endl;
 
     map<int, DdNode *> literal_to_bdd_map;
     ifstream aig_file_stream(aig_file_path);
@@ -66,6 +76,8 @@ int aig_to_bdd_solver(const string &aig_file_path,
 
     string line;
     // 1. 解析 AIGER 头信息 (aag M I L O A)
+    auto aig_header_parse_start_time =
+        std::chrono::high_resolution_clock::now();
     if (!getline(aig_file_stream, line) || line.substr(0, 3) != "aag") {
         cerr << "Error: Invalid or empty AIGER file (header)." << endl;
         aig_file_stream.close();
@@ -92,8 +104,15 @@ int aig_to_bdd_solver(const string &aig_file_path,
     }
     cout << "AIGER Header: M=" << nM << " I=" << nI << " L=" << nL
          << " O=" << nO << " A=" << nA << endl;
+    auto aig_header_parse_end_time = std::chrono::high_resolution_clock::now();
+    auto aig_header_parse_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            aig_header_parse_end_time - aig_header_parse_start_time);
+    cout << "LOG: AIGER header parsing took "
+         << aig_header_parse_duration.count() << " ms." << endl;
 
     // --- MODIFICATION START: Pre-read AIG structure for variable ordering ---
+    auto aig_preread_start_time = std::chrono::high_resolution_clock::now();
     std::vector<int> aig_primary_input_literals(
         nI); // Stores the actual literals like 2, 4, 6...
     std::map<int, int>
@@ -165,9 +184,16 @@ int aig_to_bdd_solver(const string &aig_file_path,
                                                    input2_lit);
     }
     aig_file_stream.close(); // Finished reading AIG file structure
+    auto aig_preread_end_time = std::chrono::high_resolution_clock::now();
+    auto aig_preread_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            aig_preread_end_time - aig_preread_start_time);
+    cout << "LOG: Pre-reading AIG structure took "
+         << aig_preread_duration.count() << " ms." << endl;
     // --- MODIFICATION END: Pre-read AIG structure ---
 
     // --- MODIFICATION START: Determine BDD variable order and create variables
+    auto var_order_start_time = std::chrono::high_resolution_clock::now();
     vector<DdNode *> input_vars_bdd(
         nI); // This will store DdNode* for PIs, indexed by their original AIG
              // file order (0 to nI-1)
@@ -176,7 +202,15 @@ int aig_to_bdd_solver(const string &aig_file_path,
         determine_bdd_variable_order(nI, aig_primary_input_literals,
                                      circuit_output_literals_from_aig,
                                      and_gate_definitions);
+    auto var_order_end_time = std::chrono::high_resolution_clock::now();
+    auto var_order_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            var_order_end_time - var_order_start_time);
+    cout << "LOG: Determining BDD variable order took "
+         << var_order_duration.count() << " ms." << endl;
 
+    auto bdd_var_creation_start_time =
+        std::chrono::high_resolution_clock::now();
     cout << "Debug: Creating " << nI
          << " BDD input variables based on determined order." << endl;
     for (int i = 0; i < nI; ++i) {
@@ -233,10 +267,18 @@ int aig_to_bdd_solver(const string &aig_file_path,
         input_vars_bdd[original_pi_idx] = var_node;
     }
     cout << "Debug: Finished creating BDD input variables." << endl;
+    auto bdd_var_creation_end_time = std::chrono::high_resolution_clock::now();
+    auto bdd_var_creation_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            bdd_var_creation_end_time - bdd_var_creation_start_time);
+    cout << "LOG: Creating BDD input variables took "
+         << bdd_var_creation_duration.count() << " ms." << endl;
     // --- MODIFICATION END: Determine BDD variable order and create variables
     // ---
 
     // 5. 处理 AND 门 (A 行) - Now using pre-read and_gate_lines_for_processing
+    auto and_gate_processing_start_time =
+        std::chrono::high_resolution_clock::now();
     cout << "Debug: Building BDDs for " << nA << " AND gates." << endl;
     for (const auto &gate_def : and_gate_lines_for_processing) {
         int output_lit = std::get<0>(gate_def);
@@ -267,8 +309,16 @@ int aig_to_bdd_solver(const string &aig_file_path,
         Cudd_Ref(Cudd_Not(and_node));
     }
     cout << "Debug: Finished building BDDs for AND gates." << endl;
+    auto and_gate_processing_end_time =
+        std::chrono::high_resolution_clock::now();
+    auto and_gate_processing_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            and_gate_processing_end_time - and_gate_processing_start_time);
+    cout << "LOG: Processing AND gates took "
+         << and_gate_processing_duration.count() << " ms." << endl;
 
     // 6. 获取最终输出的 BDD 节点 (第一个输出)
+    auto get_output_bdd_start_time = std::chrono::high_resolution_clock::now();
     if (nO > 0) { // circuit_output_literals_from_aig was populated earlier
         int first_output_lit = circuit_output_literals_from_aig[0];
         if (!literal_to_bdd_map.count(first_output_lit)) {
@@ -297,14 +347,23 @@ int aig_to_bdd_solver(const string &aig_file_path,
         // deref later. Cudd_Ref(bdd_circuit_output); // Original code did this.
     } else { /* Should have been caught by nO == 0 check */
     }
+    auto get_output_bdd_end_time = std::chrono::high_resolution_clock::now();
+    auto get_output_bdd_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            get_output_bdd_end_time - get_output_bdd_start_time);
+    cout << "LOG: Getting final output BDD node took "
+         << get_output_bdd_duration.count() << " ms." << endl;
 
     cout << "AIG 文件解析成功，BDD 构建初步完成。" << endl;
 
     // --- SAMPLING LOGIC (largely unchanged, but uses `input_vars_bdd` which is
     // now correctly populated) ---
+    auto sampling_logic_start_time = std::chrono::high_resolution_clock::now();
     json result_json;
     json assignment_list = json::array();
 
+    auto original_json_read_start_time =
+        std::chrono::high_resolution_clock::now();
     ifstream original_json_stream(original_json_path);
     json original_data;
     if (original_json_stream.is_open()) {
@@ -317,6 +376,13 @@ int aig_to_bdd_solver(const string &aig_file_path,
     json original_variable_list = original_data.contains("variable_list")
                                       ? original_data["variable_list"]
                                       : json::array();
+    auto original_json_read_end_time =
+        std::chrono::high_resolution_clock::now();
+    auto original_json_read_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            original_json_read_end_time - original_json_read_start_time);
+    cout << "LOG: Reading original JSON took "
+         << original_json_read_duration.count() << " ms." << endl;
 
     DdNode **input_vars_array_for_sampling = nullptr; // Renamed for clarity
     if (nI > 0) {
@@ -331,25 +397,46 @@ int aig_to_bdd_solver(const string &aig_file_path,
 
     cout << "Debug: Starting to pick " << num_samples << " samples." << endl;
     if (bdd_circuit_output == Cudd_ReadLogicZero(manager)) { /* ... */
+        cout << "LOG: Circuit output is constant ZERO. No satisfying "
+                "assignments."
+             << endl;
     } else if (bdd_circuit_output == Cudd_ReadOne(manager) &&
                nI > 0) { /* ... */
+        cout << "LOG: Circuit output is constant ONE (tautology)." << endl;
+    } else if (bdd_circuit_output == Cudd_ReadOne(manager) && nI == 0) {
+        cout << "LOG: Circuit output is constant ONE (no inputs)." << endl;
+        json assignment_entry =
+            json::array(); // Empty assignment for no-input tautology
+        assignment_list.push_back(assignment_entry);
     }
+    // ... (rest of constant BDD output checks)
 
+    auto picking_samples_loop_start_time =
+        std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_samples; ++i) {
         DdNode *minterm_node = nullptr;
         if (nI > 0) {
             minterm_node = Cudd_bddPickOneMinterm(
                 manager, bdd_circuit_output, input_vars_array_for_sampling, nI);
-        } else if (bdd_circuit_output == Cudd_ReadOne(manager)) {
+        } else if (bdd_circuit_output ==
+                   Cudd_ReadOne(manager)) { // Case for nI = 0, output is ONE
             minterm_node = Cudd_ReadOne(manager);
         }
 
         if (!minterm_node ||
             minterm_node ==
                 Cudd_ReadLogicZero(manager)) { /* ... no more solutions ... */
+            if (i == 0)
+                cout << "LOG: No satisfying assignments found for the BDD."
+                     << endl;
+            else
+                cout << "LOG: No more unique satisfying assignments found. "
+                        "Picked "
+                     << i << " samples." << endl;
             break;
         }
-        if (minterm_node != Cudd_ReadOne(manager) || nI > 0) {
+        if (minterm_node != Cudd_ReadOne(manager) ||
+            nI > 0) { // Check nI > 0 for ref
             Cudd_Ref(minterm_node);
         }
 
@@ -359,12 +446,20 @@ int aig_to_bdd_solver(const string &aig_file_path,
                // to input_vars_array_for_sampling
 
         for (const auto &var_info : original_variable_list) {
+            // ... (variable info parsing as before)
             int bit_width = var_info.value("bit_width", 1);
             unsigned long long variable_combined_value = 0;
 
             for (int bit_k = 0; bit_k < bit_width;
                  ++bit_k) { // bit_k is bit within the multi-bit variable
-                if (current_bit_idx_overall >= nI) {
+                if (current_bit_idx_overall >= nI) { /* Error handling ... */
+                    cerr << "Error: current_bit_idx_overall ("
+                         << current_bit_idx_overall << ") exceeds nI (" << nI
+                         << ") during minterm parsing." << endl;
+                    if (minterm_node != Cudd_ReadOne(manager) || nI > 0)
+                        Cudd_RecursiveDeref(manager, minterm_node);
+                    if (input_vars_array_for_sampling)
+                        delete[] input_vars_array_for_sampling;
                     Cudd_Quit(manager);
                     return 1;
                 }
@@ -375,12 +470,33 @@ int aig_to_bdd_solver(const string &aig_file_path,
 
                 // Logic to extract assignment for current_single_bit_var_bdd
                 // from minterm_node
-                if (minterm_node != Cudd_ReadOne(manager)) {
+                if (minterm_node !=
+                    Cudd_ReadOne(manager)) { // If not a tautology where minterm
+                                             // is just ONE
                     DdNode *temp_check_one = Cudd_bddAnd(
                         manager, minterm_node, current_single_bit_var_bdd);
                     Cudd_Ref(temp_check_one);
                     if (temp_check_one == minterm_node) {
                         bit_assignment = 1;
+                    } else {
+                        // Check for var = 0 might be needed if var is don't
+                        // care in minterm, but Cudd_bddPickOneMinterm should
+                        // return a full cube. Assuming var must be in minterm
+                        // if nI > 0.
+                        DdNode *temp_check_zero =
+                            Cudd_bddAnd(manager, minterm_node,
+                                        Cudd_Not(current_single_bit_var_bdd));
+                        Cudd_Ref(temp_check_zero);
+                        if (temp_check_zero == minterm_node) {
+                            bit_assignment = 0;
+                        } else {
+                            // This case should ideally not be hit if Cudd_bddPickOneMinterm works as expected
+                            // and returns a full minterm for the given variables.
+                            // Defaulting to 0 here if neither positive nor negative literal is implied by the minterm.
+                            // cout << "Warning: Variable " << current_bit_idx_overall << " is don't care in minterm, defaulting to 0." << endl;
+                            bit_assignment = 0;
+                        }
+                        Cudd_RecursiveDeref(manager, temp_check_zero);
                     }
                     Cudd_RecursiveDeref(manager, temp_check_one);
                 } else if (nI > 0) {
@@ -404,42 +520,28 @@ int aig_to_bdd_solver(const string &aig_file_path,
                     // Cudd_Ref(temp_check_one); if (temp_check_one
                     // == minterm_node) { bit_assignment = 1; } else { DdNode
                     // *not_current_bit_var_bdd = Cudd_Not(current_bit_var_bdd);
-                    //        DdNode *temp_check_zero = Cudd_bddAnd(manager,
-                    //        minterm_node, not_current_bit_var_bdd);
-                    //        Cudd_Ref(temp_check_zero); if (temp_check_zero ==
-                    //        minterm_node) { bit_assignment = 0;} else { /*
-                    //        Warning, default 0 */ }
-                    //        Cudd_RecursiveDeref(manager, temp_check_zero); }
+                    //       DdNode *temp_check_zero = Cudd_bddAnd(manager,
+                    //       minterm_node, not_current_bit_var_bdd);
+                    //       Cudd_Ref(temp_check_zero); if (temp_check_zero ==
+                    //       minterm_node) { bit_assignment = 0;} else { /*
+                    //       Warning, default 0 */ }
+                    //       Cudd_RecursiveDeref(manager, temp_check_zero); }
                     // Cudd_RecursiveDeref(manager, temp_check_one);
                     // This original logic is more robust. Let's reinstate it.
-                    DdNode *temp_check_positive = Cudd_bddAnd(
-                        manager, minterm_node, current_single_bit_var_bdd);
-                    Cudd_Ref(temp_check_positive);
-                    if (temp_check_positive == minterm_node) {
-                        bit_assignment = 1;
-                    } else {
-                        DdNode *temp_check_negative =
-                            Cudd_bddAnd(manager, minterm_node,
-                                        Cudd_Not(current_single_bit_var_bdd));
-                        Cudd_Ref(temp_check_negative);
-                        if (temp_check_negative == minterm_node) {
-                            bit_assignment = 0;
-                        } else {
-                            // This variable might be a "don't care" for this
-                            // specific minterm, or if minterm_node is BDD_ONE
-                            // (tautology). PickOneMinterm should still pick *a*
-                            // value. Defaulting to 0 is one strategy for "don't
-                            // care". cout << "Warning: Could not determine
-                            // assignment for CUDD var (level "
-                            //      << Cudd_ReadIndex(manager,
-                            //      current_single_bit_var_bdd)
-                            //      << ") in minterm. Defaulting to 0." << endl;
-                            bit_assignment = 0;
-                        }
-                        Cudd_RecursiveDeref(manager, temp_check_negative);
-                    }
-                    Cudd_RecursiveDeref(manager, temp_check_positive);
+                    // The code block above already implements this reinstated logic.
+                    // If minterm_node is BDD_ONE (constant true function) and nI > 0,
+                    // Cudd_bddPickOneMinterm should still select a specific minterm
+                    // (e.g., all variables assigned 0).
+                    // The current default bit_assignment = 0 will be used if minterm_node is BDD_ONE here,
+                    // which means we'd be constructing an all-zero assignment if the function is a tautology.
+                    // This is one valid satisfying assignment.
+                    bit_assignment =
+                        0; // Defaulting for tautology or if var is truly don't care
+                           // for a specific chosen minterm from a tautology.
+                    // PickOneMinterm should give a full assignment though.
                 }
+                // else if nI == 0, minterm_node is BDD_ONE, loop for var_info
+                // won't run if original_variable_list is empty.
 
                 variable_combined_value |= (bit_assignment << bit_k);
                 current_bit_idx_overall++;
@@ -447,25 +549,69 @@ int aig_to_bdd_solver(const string &aig_file_path,
             assignment_entry.push_back(
                 {{"value", to_hex_string(variable_combined_value, bit_width)}});
         }
+        // ... (rest of sampling loop, list push_back, Deref minterm_node)
         assignment_list.push_back(assignment_entry);
-        if (minterm_node != Cudd_ReadOne(manager) || nI > 0) {
-            Cudd_RecursiveDeref(manager, minterm_node);
+
+        if (minterm_node != Cudd_ReadOne(manager) ||
+            nI > 0) { // Check nI > 0 for deref
+            // Exclude the next minterm from the BDD to pick a different one next time
+            DdNode *not_minterm = Cudd_Not(minterm_node);
+            Cudd_Ref(not_minterm);
+            DdNode *temp_bdd_output =
+                Cudd_bddAnd(manager, bdd_circuit_output, not_minterm);
+            Cudd_Ref(temp_bdd_output);
+            Cudd_RecursiveDeref(
+                manager, bdd_circuit_output); // Deref old bdd_circuit_output
+            bdd_circuit_output = temp_bdd_output; // Update bdd_circuit_output
+            // No need to Cudd_Ref(bdd_circuit_output) again as temp_bdd_output is already Ref'd and assigned.
+            Cudd_RecursiveDeref(manager, not_minterm);
+            Cudd_RecursiveDeref(manager,
+                                minterm_node); // Deref the picked minterm
         }
     }
+    auto picking_samples_loop_end_time =
+        std::chrono::high_resolution_clock::now();
+    auto picking_samples_loop_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            picking_samples_loop_end_time - picking_samples_loop_start_time);
+    cout << "LOG: Picking samples loop took "
+         << picking_samples_loop_duration.count() << " ms." << endl;
 
     if (input_vars_array_for_sampling) {
         delete[] input_vars_array_for_sampling;
+        input_vars_array_for_sampling = nullptr;
     }
+    // ... (JSON output writing)
+    auto sampling_logic_end_time = std::chrono::high_resolution_clock::now();
+    auto sampling_logic_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            sampling_logic_end_time - sampling_logic_start_time);
+    cout << "LOG: Entire sampling logic (including JSON read and sample "
+            "picking) took "
+         << sampling_logic_duration.count() << " ms." << endl;
 
+    auto json_write_start_time = std::chrono::high_resolution_clock::now();
     result_json["assignment_list"] = assignment_list;
     std::ofstream output_json_stream(result_json_path);
-    if (!output_json_stream.is_open()) {
+    if (!output_json_stream.is_open()) { /* ... error ... */
+        cerr << "Error: Could not open result JSON file for writing: "
+             << result_json_path << endl;
+        if (bdd_circuit_output)
+            Cudd_RecursiveDeref(manager,
+                                bdd_circuit_output); // Deref before quit
         Cudd_Quit(manager);
         return 1;
     }
     output_json_stream << result_json.dump(4) << std::endl;
     output_json_stream.close();
+    auto json_write_end_time = std::chrono::high_resolution_clock::now();
+    auto json_write_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            json_write_end_time - json_write_start_time);
+    cout << "LOG: Writing result JSON took " << json_write_duration.count()
+         << " ms." << endl;
 
+    auto cudd_cleanup_start_time = std::chrono::high_resolution_clock::now();
     if (bdd_circuit_output)
         Cudd_RecursiveDeref(manager, bdd_circuit_output);
 
@@ -474,21 +620,52 @@ int aig_to_bdd_solver(const string &aig_file_path,
     // intermediate nodes were not properly managed. However, Cudd_Quit is
     // generally robust for nodes created by CUDD. For safety, if not relying
     // solely on Cudd_Quit:
-    for (auto const &[key, val_node] : literal_to_bdd_map) {
-        if (val_node) { // Check against nullptr just in case, though map
-                        // shouldn't store them Be careful here: if
-                        // bdd_circuit_output was one of these, it's already
-                        // Deref'd. This requires careful ref count management.
-                        // Typically Cudd_Quit handles registered nodes. Let's
-                        // assume Cudd_Quit is sufficient for nodes in the map
-                        // that were Cudd_Ref'd.
-        }
-    }
-    literal_to_bdd_map.clear();
+    // The bdd_circuit_output was potentially one of these, and it was handled.
+    // Other nodes in the map were inputs to AND gates or intermediate AND gate outputs.
+    // Cudd_Ref was called when they were put into the map.
+    // Cudd_Quit should handle these, but explicit dereferencing is safer if unsure.
+    // However, repeatedly dereferencing bdd_circuit_output (if it's also in the map and
+    // separately dereferenced) can lead to errors.
+    // Given the current structure, where bdd_circuit_output is taken from the map and then
+    // potentially modified (e.g., during sampling by ANDing with not_minterm),
+    // we need to be careful. The current bdd_circuit_output is the one to deref.
+    // The original items in literal_to_bdd_map (PIs and AND gate outputs before sampling modification)
+    // should also be deref'd if Cudd_Quit doesn't clean them up perfectly.
+    // Cudd_Quit is designed to free all memory associated with a manager, including all BDD nodes.
+    // Explicitly dereferencing all nodes in literal_to_bdd_map *before* Cudd_Quit
+    // is good practice if those nodes are not aliased by bdd_circuit_output at the very end.
+    // Since bdd_circuit_output is the final representation of the function, and other nodes
+    // in the map are sub-expressions, Cudd_Quit should be able to handle it.
+    // Let's rely on Cudd_Quit for map contents after bdd_circuit_output is handled.
+    // If we were to manually deref:
+    // for (auto const &[key, val_node] : literal_to_bdd_map) {
+    //     if (val_node && val_node != bdd_circuit_output ) { // Avoid double deref if bdd_circuit_output points to an item
+    //          // This check is tricky because bdd_circuit_output might have been modified
+    //          // and not be the *exact* DdNode* pointer from the map anymore.
+    //          // Cudd_RecursiveDeref(manager, val_node); // Risky without careful ref count tracking through modifications
+    //     }
+    // }
+    literal_to_bdd_map
+        .clear(); // Clearing the map of pointers, actual BDD nodes are managed by CUDD
 
     Cudd_Quit(manager);
+    auto cudd_cleanup_end_time = std::chrono::high_resolution_clock::now();
+    auto cudd_cleanup_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            cudd_cleanup_end_time - cudd_cleanup_start_time);
+    cout << "LOG: CUDD cleanup took " << cudd_cleanup_duration.count() << " ms."
+         << endl;
+
     std::cout << "BDD 求解器完成。结果已写入到 " << result_json_path
               << std::endl;
+
+    auto function_end_time = std::chrono::high_resolution_clock::now();
+    auto function_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            function_end_time - function_start_time);
+    cout << "LOG: Total execution time for aig_to_bdd_solver: "
+         << function_duration.count() << " ms." << endl;
+
     return 0;
 }
 
