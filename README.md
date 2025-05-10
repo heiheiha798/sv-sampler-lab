@@ -124,7 +124,7 @@
 
 bash build.sh
 
-./run1.sh /root/sv-sampler-lab/basic/2.json 10 ./outputs 12345
+./run.sh /root/sv-sampler-lab/basic/0.json 10 ./outputs 12345
 
 ./run.sh /root/sv-sampler-lab/basic/2.json 10 ./outputs 12345
 
