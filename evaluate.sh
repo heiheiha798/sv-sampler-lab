@@ -164,6 +164,6 @@ elif [ "$part" == "opt5" ]; then
 elif [ "$part" == "all" ]; then
     test_all
 else
-    echo "Usage: ./evaluate [basic|opt1|opt2|opt3|opt4|opt5|all] {id}"
+    echo "Usage: ./evaluate.sh [basic|opt1|opt2|opt3|opt4|opt5|all] {id}"
     return 1
 fi

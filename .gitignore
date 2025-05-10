@@ -2,6 +2,7 @@
 /outputs/
 /_run/
 src/generated_files/
+/op_detect/
 *.o
 *.d
 *.a

@@ -31,10 +31,9 @@ string expression_tree(const json &node)
     }
 
     // 一元运算
-    else if (type == "BIT_NEG" || type == "LOG_NEG" ||
-             type == "RED_AND" || type == "RED_OR" || type == "RED_XOR" ||
-             type == "RED_NAND" || type == "RED_NOR" || type == "RED_XNOR" ||
-             type == "UNARY_PLUS" || type == "UNARY_MINUS" || type == "MINUS")
+    // 根据 op_detector 结果，保留: BIT_NEG, LOG_NEG, MINUS (作为一元负号)
+    // 移除了 RED_AND, RED_OR, RED_XOR, RED_NAND, RED_NOR, RED_XNOR, UNARY_PLUS
+    else if (type == "BIT_NEG" || type == "LOG_NEG" || type == "MINUS")
     {
         string lhs = expression_tree(node["lhs_expression"]);
         string op_symbol;
@@ -42,31 +41,20 @@ string expression_tree(const json &node)
             op_symbol = "~";
         else if (type == "LOG_NEG")
             op_symbol = "!";
-        else if (type == "RED_AND")
-            op_symbol = "&";
-        else if (type == "RED_OR")
-            op_symbol = "|";
-        else if (type == "RED_XOR")
-            op_symbol = "^";
-        else if (type == "RED_NAND")
-            op_symbol = "~&";
-        else if (type == "RED_NOR")
-            op_symbol = "~|";
-        else if (type == "RED_XNOR")
-            op_symbol = "~^";
-        else if (type == "UNARY_PLUS")
-            op_symbol = "+";
-        else if (type == "MINUS")
+        else if (type == "MINUS") // 假设 MINUS 是您列表中的一元负号
             op_symbol = "-";
-
         return op_symbol + "(" + lhs + ")";
     }
 
     // 二元运算符
+    // 根据 op_detector 结果，保留: ADD, SUB, MUL, DIV, MOD, LSHIFT, RSHIFT,
+    // BIT_AND, BIT_OR, BIT_XOR, LOG_AND, LOG_OR, EQ, NEQ, IMPLY
+    // 移除了 LT, LE, GT, GE
     else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" || type == "MOD" ||
              type == "LSHIFT" || type == "RSHIFT" ||
-             type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" || type == "LOG_AND" || type == "LOG_OR" ||
-             type == "EQ" || type == "NEQ" || type == "LT" || type == "LE" || type == "GT" || type == "GE" || type == "IMPLY")
+             type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" ||
+             type == "LOG_AND" || type == "LOG_OR" ||
+             type == "EQ" || type == "NEQ" || type == "IMPLY")
     {
         string lhs = expression_tree(node["lhs_expression"]);
         string rhs = expression_tree(node["rhs_expression"]);
@@ -108,20 +96,19 @@ string expression_tree(const json &node)
                 op_symbol = "==";
             else if (type == "NEQ")
                 op_symbol = "!=";
-            else if (type == "LT")
-                op_symbol = "<";
-            else if (type == "LE")
-                op_symbol = "<=";
-            else if (type == "GT")
-                op_symbol = ">";
-            else if (type == "GE")
-                op_symbol = ">=";
+            // LT, LE, GT, GE 已根据列表移除
             return "(" + lhs + " " + op_symbol + " " + rhs + ")";
         }
     }
+    // 如果 op 类型不在上述任何一个分支中，可以考虑添加一个警告或错误处理
+    else {
+        cerr << "Warning: Unhandled or unknown 'op' type encountered in expression_tree: " << type << endl;
+        return "/* UNHANDLED_OP: " + type + " */"; // 返回一个表示错误的字符串
+    }
 
-    return "";
+    return "/* ERROR_IN_EXPRESSION_TREE_LOGIC */";
 }
+
 
 // 核心模块：JSON 到 Verilog 转换
 int json_v_converter(const string &input_json_path, const string &output_v_dir)
