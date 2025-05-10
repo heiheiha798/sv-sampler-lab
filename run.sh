@@ -40,13 +40,12 @@ YOSYS_EXECUTABLE=/root/sv-sampler-lab/yosys/yosys
 YOSYS_SCRIPT_CONTENT="
 read_verilog \"${GENERATED_V_FILE}\";
 synth -auto-top;
-abc; # <--- 加入这行，使用ABC的默认优化
+abc;
 aigmap;
 opt;
 clean;
 write_aiger -ascii \"${OUTPUT_AIG_FILE}\";
 "
-
 
 # 使用 -q 选项来减少 Yosys 的输出（静默模式）
 "$YOSYS_EXECUTABLE" -q -p "$YOSYS_SCRIPT_CONTENT"

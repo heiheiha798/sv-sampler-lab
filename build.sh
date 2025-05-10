@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+apt install sudo
 sudo apt update
 sudo apt-get update
 sudo apt-get -y install python3 bc python-is-python3
