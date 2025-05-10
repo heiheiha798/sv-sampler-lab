@@ -1,7 +1,7 @@
 #ifndef SOLVER_FUNCTIONS_H
 #define SOLVER_FUNCTIONS_H
 
-#include "nlohmann/json.hpp" // 包含 nlohmann/json 头文件
+#include "nlohmann/json.hpp"
 #include <string>
 #include <vector>
 
@@ -9,7 +9,6 @@
 std::string to_hex_string(unsigned long long value, int bit_width);
 
 // 声明主 BDD 求解器函数
-// original_json_path 用于在 BDD 求解器中获取变量的原始信息（如位宽和ID）
 int aig_to_bdd_solver(const std::string &aig_file_path,
                       const std::string &original_json_path, int num_samples,
                       const std::string &result_json_path,
@@ -19,4 +18,4 @@ int aig_to_bdd_solver(const std::string &aig_file_path,
 int json_v_converter(const std::string &input_json_path,
                      const std::string &output_v_dir);
 
-#endif // SOLVER_FUNCTIONS_H
+#endif

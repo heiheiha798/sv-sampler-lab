@@ -1,22 +1,20 @@
 #include "solver_functions.h"
 
-#include <algorithm> // For std::reverse, std::find
-#include <cstdio>    // For sscanf
-#include <cstdlib>   // For stoi, stoul
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
-#include <functional> // For std::function in ordering heuristic
-#include <iomanip>    // For setw, setfill
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
-#include <set>     // For std::set in ordering heuristic
-#include <sstream> // For stringstream
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "cudd.h" // CUDD library header
 
-// Assuming nlohmann/json.hpp is in a path known to the compiler
-// If not, you might need to adjust the include path for json.hpp
 #include "nlohmann/json.hpp" // For JSON operations
 
 using json = nlohmann::json;
@@ -170,7 +168,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
     // --- MODIFICATION END: Pre-read AIG structure ---
 
     // --- MODIFICATION START: Determine BDD variable order and create variables
-    // ---
     vector<DdNode *> input_vars_bdd(
         nI); // This will store DdNode* for PIs, indexed by their original AIG
              // file order (0 to nI-1)

@@ -1,5 +1,5 @@
 #include "nlohmann/json.hpp"
-#include "solver_functions.h" // 包含 aig_to_bdd_solver 的声明 (虽然 json_v_converter 不直接使用，但为了项目结构保留)
+#include "solver_functions.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -42,9 +42,6 @@ string expression_tree(const json &node) {
     }
 
     // 二元运算符
-    // 根据 op_detector 结果，保留: ADD, SUB, MUL, DIV, MOD, LSHIFT, RSHIFT,
-    // BIT_AND, BIT_OR, BIT_XOR, LOG_AND, LOG_OR, EQ, NEQ, IMPLY
-    // 移除了 LT, LE, GT, GE
     else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" ||
              type == "MOD" || type == "LSHIFT" || type == "RSHIFT" ||
              type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" ||
@@ -89,11 +86,10 @@ string expression_tree(const json &node) {
                 op_symbol = "==";
             else if (type == "NEQ")
                 op_symbol = "!=";
-            // LT, LE, GT, GE 已根据列表移除
             return "(" + lhs + " " + op_symbol + " " + rhs + ")";
         }
     }
-    // 如果 op 类型不在上述任何一个分支中，可以考虑添加一个警告或错误处理
+    // 如果 op 类型不在上述任何一个分支中，给出一个警告或错误处理
     else {
         cerr << "Warning: Unhandled or unknown 'op' type encountered in "
                 "expression_tree: "
