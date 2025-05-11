@@ -129,52 +129,6 @@ static void get_pi_support_for_node_dfs_recursive(
         node_pi_support.insert(support1.begin(), support1.end());
         node_pi_support.insert(support2.begin(), support2.end());
     }
-    // 如果节点不是PI，也不是AND门定义（例如，一个未连接的AIG节点或错误），则其支持集为空（或已收集到的）
-
-    // 在此DFS路径探索完成后，将计算得到的支持集存入全局记忆化map
-    // 确保不会覆盖由其他路径可能已为该节点计算并存储的（可能更完整的）支持集
-    // （get_pi_support的顶层调用会处理最终的存储）
-    // 此处的memoized_supports[regular_literal] = node_pi_support; 已移至get_pi_support的顶层调用后。
-    // 在这里，我们只是累加到 node_pi_support。
-}
-
-// Helper function to perform DFS from a node to collect all PI literals in its support.
-// This function is internal to determine_bdd_variable_order's needs or could be a static helper.
-static void get_pi_support_for_component_dfs(
-    int current_literal,
-    const std::map<int, std::pair<int, int>> &and_gate_definitions,
-    const std::set<int> &all_pi_literals_set,
-    std::set<int> &component_pi_support, // Output: PIs found for this component
-    std::set<int>
-        &visited_for_support_dfs) { // Tracks visited nodes for THIS DFS call
-
-    int regular_literal = (current_literal / 2) * 2;
-
-    if (regular_literal == 0 ||
-        regular_literal == 1) { // Constants 0 or 1 (literal 1)
-        return;
-    }
-    if (visited_for_support_dfs.count(regular_literal)) {
-        return;
-    }
-    visited_for_support_dfs.insert(regular_literal);
-
-    if (all_pi_literals_set.count(regular_literal)) {
-        component_pi_support.insert(regular_literal);
-        return;
-    }
-
-    auto it = and_gate_definitions.find(regular_literal);
-    if (it != and_gate_definitions.end()) {
-        const auto &inputs = it->second;
-        get_pi_support_for_component_dfs(
-            inputs.first, and_gate_definitions, all_pi_literals_set,
-            component_pi_support, visited_for_support_dfs);
-        get_pi_support_for_component_dfs(
-            inputs.second, and_gate_definitions, all_pi_literals_set,
-            component_pi_support, visited_for_support_dfs);
-    }
-    // If not a PI and not in and_gate_definitions, it's an isolated node or error (or literal 1 if not handled as constant earlier)
 }
 
 // --- NEW HELPER FUNCTION PROTOTYPE for variable ordering ---
@@ -342,32 +296,19 @@ bool generate_random_solution_dfs(
 }
 // --- END OF MODIFICATIONS FOR NEW SAMPLING ---
 
-// 实现主 BDD 求解器函数
-int aig_to_bdd_solver(const string &aig_file_path,
-                      const string &original_json_path, int num_samples,
-                      const string &result_json_path,
-                      unsigned int random_seed) {
-    auto function_start_time =
-        std::chrono::high_resolution_clock::now(); // 函数总计时开始
+// --- START OF HELPER FUNCTION IMPLEMENTATIONS FOR aig_to_bdd_solver ---
 
-    // Initialize random number generator for new sampling
-    rng.seed(random_seed);
-
-    DdManager *manager;
-    DdNode *bdd_circuit_output = nullptr;
-    int nM = 0, nI = 0, nL = 0, nO = 0, nA = 0;
-
-    // 1. 初始化 CUDD 管理器
+static DdManager *initialize_cudd_manager(unsigned int random_seed) {
     auto cudd_init_start_time = std::chrono::high_resolution_clock::now();
-    manager = Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
+    DdManager *manager =
+        Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
     if (!manager) {
         cerr << "Error: CUDD manager initialization failed." << endl;
-        return 1;
+        return nullptr;
     }
     Cudd_AutodynEnable(manager, CUDD_REORDER_SIFT);
     cout << "Debug: Automatic dynamic variable reordering enabled "
-            "(CUDD_REORDER_SIFT)."
-         << endl;
+         << "(CUDD_REORDER_SIFT)." << endl;
     // Cudd_Srandom(manager, random_seed); // CUDD's internal random for reordering/picking
     // We use our own rng for path selection.
     auto cudd_init_end_time = std::chrono::high_resolution_clock::now();
@@ -376,49 +317,128 @@ int aig_to_bdd_solver(const string &aig_file_path,
             cudd_init_end_time - cudd_init_start_time);
     cout << "LOG: CUDD manager initialization took "
          << cudd_init_duration.count() << " ms." << endl;
+    return manager;
+}
 
-    map<int, DdNode *> literal_to_bdd_map;
-
-    literal_to_bdd_map[0] = Cudd_ReadLogicZero(manager);
-    literal_to_bdd_map[1] = Cudd_ReadOne(manager);
-
-    ifstream aig_file_stream(aig_file_path);
-    if (!aig_file_stream.is_open()) {
-        cerr << "Error: Could not open AIG file: " << aig_file_path << endl;
-        Cudd_Quit(manager);
-        return 1;
-    }
-
+static bool parse_aig_header(std::ifstream &aig_file_stream, int &nM, int &nI,
+                             int &nL, int &nO, int &nA) {
     string line;
-    // 1. 解析 AIGER 头信息 (aag M I L O A)
-    auto aig_header_parse_start_time =
-        std::chrono::high_resolution_clock::now();
     if (!getline(aig_file_stream, line) || line.substr(0, 3) != "aag") {
         cerr << "Error: Invalid or empty AIGER file (header)." << endl;
-        aig_file_stream.close();
-        Cudd_Quit(manager);
-        return 1;
+        return false;
     }
     stringstream header_ss(line.substr(4));
     if (!(header_ss >> nM >> nI >> nL >> nO >> nA)) {
         cerr << "Error: Malformed AIGER header values." << endl;
-        aig_file_stream.close();
-        Cudd_Quit(manager);
-        return 1;
+        return false;
     }
     if (nL != 0) {
         cerr << "Warning: AIGER file contains latches (nL > 0), this solver "
-                "only handles combinational circuits."
-             << endl;
+             << "only handles combinational circuits." << endl;
     }
     if (nO == 0) {
         cerr << "Error: AIGER file has no outputs." << endl;
-        aig_file_stream.close();
-        Cudd_Quit(manager);
-        return 1;
+        return false;
     }
     cout << "AIGER Header: M=" << nM << " I=" << nI << " L=" << nL
          << " O=" << nO << " A=" << nA << endl;
+    return true;
+}
+
+static bool
+read_aig_pis_and_map(std::ifstream &aig_file_stream, int nI,
+                     std::vector<int> &aig_primary_input_literals,
+                     std::map<int, int> &aig_literal_to_original_pi_index) {
+    aig_primary_input_literals.resize(nI);
+    string line;
+    for (int i = 0; i < nI; ++i) {
+        if (!getline(aig_file_stream, line)) {
+            cerr << "Error reading PI line " << i << endl;
+            return false;
+        }
+        int input_lit;
+        if (sscanf(line.c_str(), "%d", &input_lit) != 1) {
+            cerr << "Error parsing PI line " << i << endl;
+            return false;
+        }
+        aig_primary_input_literals[i] = input_lit;
+        aig_literal_to_original_pi_index[input_lit] = i;
+    }
+    return true;
+}
+
+static bool skip_aig_latches(std::ifstream &aig_file_stream, int nL) {
+    string line;
+    for (int i = 0; i < nL; ++i) {
+        if (!getline(aig_file_stream, line)) {
+            cerr << "Error reading Latch line " << i << endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool read_aig_pos(std::ifstream &aig_file_stream, int nO,
+                         std::vector<int> &circuit_output_literals_from_aig) {
+    circuit_output_literals_from_aig.resize(nO);
+    string line;
+    for (int i = 0; i < nO; ++i) {
+        if (!getline(aig_file_stream, line)) {
+            cerr << "Error reading PO line " << i << endl;
+            return false;
+        }
+        int output_lit;
+        if (sscanf(line.c_str(), "%d", &output_lit) != 1) {
+            cerr << "Error parsing PO line " << i << endl;
+            return false;
+        }
+        circuit_output_literals_from_aig[i] = output_lit;
+    }
+    return true;
+}
+
+static bool read_aig_and_gate_definitions_and_lines(
+    std::ifstream &aig_file_stream, int nA,
+    std::map<int, std::pair<int, int>> &and_gate_definitions,
+    std::vector<std::tuple<int, int, int>> &and_gate_lines_for_processing) {
+    string line;
+    for (int i = 0; i < nA; ++i) {
+        if (!getline(aig_file_stream, line)) {
+            cerr << "Error reading AND line " << i << endl;
+            return false;
+        }
+        stringstream ss(line);
+        int output_lit, input1_lit, input2_lit;
+        if (!(ss >> output_lit >> input1_lit >> input2_lit)) {
+            cerr << "Error parsing AND line " << i << endl;
+            return false;
+        }
+        and_gate_definitions[output_lit] = {input1_lit, input2_lit};
+        and_gate_lines_for_processing.emplace_back(output_lit, input1_lit,
+                                                   input2_lit);
+    }
+    return true;
+}
+
+static bool parse_aig_file(
+    const std::string &aig_file_path, int &nM, int &nI, int &nL, int &nO,
+    int &nA, std::vector<int> &aig_primary_input_literals,
+    std::map<int, int> &aig_literal_to_original_pi_index,
+    std::vector<int> &circuit_output_literals_from_aig,
+    std::map<int, std::pair<int, int>> &and_gate_definitions,
+    std::vector<std::tuple<int, int, int>> &and_gate_lines_for_processing) {
+    std::ifstream aig_file_stream(aig_file_path);
+    if (!aig_file_stream.is_open()) {
+        cerr << "Error: Could not open AIG file: " << aig_file_path << endl;
+        return false;
+    }
+
+    auto aig_header_parse_start_time =
+        std::chrono::high_resolution_clock::now();
+    if (!parse_aig_header(aig_file_stream, nM, nI, nL, nO, nA)) {
+        aig_file_stream.close();
+        return false;
+    }
     auto aig_header_parse_end_time = std::chrono::high_resolution_clock::now();
     auto aig_header_parse_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -426,147 +446,82 @@ int aig_to_bdd_solver(const string &aig_file_path,
     cout << "LOG: AIGER header parsing took "
          << aig_header_parse_duration.count() << " ms." << endl;
 
-    // --- MODIFICATION START: Pre-read AIG structure for variable ordering ---
     auto aig_preread_start_time = std::chrono::high_resolution_clock::now();
-    std::vector<int> aig_primary_input_literals(
-        nI); // Stores the actual literals like 2, 4, 6...
-    std::map<int, int>
-        aig_literal_to_original_pi_index; // Maps AIG PI literal to its 0-based
-                                          // index in file
-
-    for (int i = 0; i < nI; ++i) {
-        if (!getline(aig_file_stream, line)) { /* Error handling */
-            cerr << "Error reading PI line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        int input_lit;
-        if (sscanf(line.c_str(), "%d", &input_lit) != 1) { /* Error handling */
-            cerr << "Error parsing PI line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        aig_primary_input_literals[i] = input_lit;
-        aig_literal_to_original_pi_index[input_lit] = i;
+    if (!read_aig_pis_and_map(aig_file_stream, nI, aig_primary_input_literals,
+                              aig_literal_to_original_pi_index)) {
+        aig_file_stream.close();
+        return false;
     }
-
-    for (int i = 0; i < nL; ++i) {             // Skip latch lines
-        if (!getline(aig_file_stream, line)) { /* Error handling */
-            cerr << "Error reading Latch line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
+    if (!skip_aig_latches(aig_file_stream, nL)) {
+        aig_file_stream.close();
+        return false;
     }
-
-    std::vector<int> circuit_output_literals_from_aig(nO);
-    for (int i = 0; i < nO; ++i) {
-        if (!getline(aig_file_stream, line)) { /* Error handling */
-            cerr << "Error reading PO line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        int output_lit;
-        if (sscanf(line.c_str(), "%d", &output_lit) != 1) { /* Error handling */
-            cerr << "Error parsing PO line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        circuit_output_literals_from_aig[i] = output_lit;
+    if (!read_aig_pos(aig_file_stream, nO, circuit_output_literals_from_aig)) {
+        aig_file_stream.close();
+        return false;
     }
-
-    std::map<int, std::pair<int, int>>
-        and_gate_definitions; // LHS literal -> {RHS1, RHS2}
-    std::vector<tuple<int, int, int>>
-        and_gate_lines_for_processing; // Store lines to process after var
-                                       // creation
-
-    for (int i = 0; i < nA; ++i) {
-        if (!getline(aig_file_stream, line)) { /* Error handling */
-            cerr << "Error reading AND line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        stringstream ss(line);
-        int output_lit, input1_lit, input2_lit;
-        if (!(ss >> output_lit >> input1_lit >>
-              input2_lit)) { /* Error handling */
-            cerr << "Error parsing AND line " << i << endl;
-            Cudd_Quit(manager);
-            return 1;
-        }
-        and_gate_definitions[output_lit] = {input1_lit, input2_lit};
-        and_gate_lines_for_processing.emplace_back(output_lit, input1_lit,
-                                                   input2_lit);
+    if (!read_aig_and_gate_definitions_and_lines(
+            aig_file_stream, nA, and_gate_definitions,
+            and_gate_lines_for_processing)) {
+        aig_file_stream.close();
+        return false;
     }
-    aig_file_stream.close(); // Finished reading AIG file structure
+    aig_file_stream.close();
     auto aig_preread_end_time = std::chrono::high_resolution_clock::now();
     auto aig_preread_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             aig_preread_end_time - aig_preread_start_time);
     cout << "LOG: Pre-reading AIG structure took "
          << aig_preread_duration.count() << " ms." << endl;
-    // --- MODIFICATION END: Pre-read AIG structure ---
+    return true;
+}
 
-    // --- MODIFICATION START: Determine BDD variable order and create variables
-    auto var_order_start_time = std::chrono::high_resolution_clock::now();
-    vector<DdNode *> input_vars_bdd(
-        nI); // This will store DdNode* for PIs, indexed by their original AIG
-             // file order (0 to nI-1). nI is from AIG header.
-
-    // 调用修改后的 determine_bdd_variable_order 函数
-    // 参数 nI 是从AIG头中读取的输入数量，这应该与 aig_primary_input_literals.size() 相符
-    std::vector<int> ordered_aig_pi_literals_for_bdd_creation =
-        determine_bdd_variable_order(nI, aig_primary_input_literals,
-                                     circuit_output_literals_from_aig,
-                                     and_gate_definitions);
-    // 注意：这里传递的 nI 是来自 AIG header 的 MILOA 中的 'I'。
-    // determine_bdd_variable_order 内部逻辑需要确保处理的 PI 数量与此一致或基于 aig_primary_input_literals.size()
-
-    auto var_order_end_time = std::chrono::high_resolution_clock::now();
-    auto var_order_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            var_order_end_time - var_order_start_time);
-    cout << "LOG: Determining BDD variable order took "
-         << var_order_duration.count() << " ms." << endl;
-
+static bool create_bdd_variables_from_ordered_pis(
+    DdManager *manager,
+    const std::vector<int> &ordered_aig_pi_literals_for_bdd_creation,
+    int nI_from_header,
+    const std::map<int, int> &aig_literal_to_original_pi_index,
+    std::map<int, DdNode *> &literal_to_bdd_map,
+    std::vector<DdNode *> &input_vars_bdd,                    // Output
+    std::map<int, int> &cudd_idx_to_original_aig_pi_file_idx) //Output
+{
     auto bdd_var_creation_start_time =
         std::chrono::high_resolution_clock::now();
     cout << "Debug: Creating "
-         << ordered_aig_pi_literals_for_bdd_creation
-                .size() // 使用实际得到的排序后PI数量
+         << ordered_aig_pi_literals_for_bdd_creation.size()
          << " BDD input variables based on determined order (AIG header nI: "
-         << nI << ")." << endl;
+         << nI_from_header << ")." << endl;
 
-    if (ordered_aig_pi_literals_for_bdd_creation.size() > (size_t)nI) {
+    if (ordered_aig_pi_literals_for_bdd_creation.size() >
+        (size_t)nI_from_header) {
         cout << "Warning: Number of PIs in determined order ("
              << ordered_aig_pi_literals_for_bdd_creation.size()
-             << ") is greater than nI from header (" << nI
+             << ") is greater than nI from header (" << nI_from_header
              << "). Using determined order size." << endl;
     }
+
+    input_vars_bdd.resize(
+        nI_from_header); // Resize based on header nI for consistent indexing
 
     for (size_t i = 0; i < ordered_aig_pi_literals_for_bdd_creation.size();
          ++i) {
         int current_aig_pi_literal_to_create =
             ordered_aig_pi_literals_for_bdd_creation[i];
 
-        // 检查这个PI是否已经在map中（理论上不应该，因为是按顺序第一次创建）
         if (literal_to_bdd_map.count(current_aig_pi_literal_to_create)) {
             cerr << "Error: PI literal " << current_aig_pi_literal_to_create
                  << " already has a BDD node before creation in ordered list. "
                     "Logic error."
                  << endl;
-            // ... 错误处理 ...
-            return 1;
+            return false;
         }
 
-        DdNode *var_node =
-            Cudd_bddNewVar(manager); // Creates BDD var at CUDD level 'i'
-        if (!var_node) {             /* ... Error handling ... */
+        DdNode *var_node = Cudd_bddNewVar(manager);
+        if (!var_node) {
             cerr << "Cudd_bddNewVar failed for PI "
                  << current_aig_pi_literal_to_create << " at CUDD index " << i
                  << endl;
-            Cudd_Quit(manager);
-            return 1;
+            return false;
         }
 
         literal_to_bdd_map[current_aig_pi_literal_to_create] = var_node;
@@ -575,20 +530,18 @@ int aig_to_bdd_solver(const string &aig_file_path,
         Cudd_Ref(var_node);
         Cudd_Ref(Cudd_Not(var_node));
 
-        // 更新 input_vars_bdd：通过AIG literal找到它在原始AIG输入列表中的索引
         auto it_orig_idx = aig_literal_to_original_pi_index.find(
             current_aig_pi_literal_to_create);
         if (it_orig_idx != aig_literal_to_original_pi_index.end()) {
             int original_pi_file_order_idx = it_orig_idx->second;
-            if (original_pi_file_order_idx <
-                nI) { // 确保索引在 input_vars_bdd 的界限内
+            if (original_pi_file_order_idx < nI_from_header) {
                 input_vars_bdd[original_pi_file_order_idx] = var_node;
             } else {
                 cerr << "Warning: Original PI index "
                      << original_pi_file_order_idx << " for literal "
                      << current_aig_pi_literal_to_create
-                     << " is out of bounds for input_vars_bdd (size " << nI
-                     << ")." << endl;
+                     << " is out of bounds for input_vars_bdd (size "
+                     << nI_from_header << ")." << endl;
             }
         } else {
             cerr << "Warning: AIG PI literal "
@@ -598,8 +551,7 @@ int aig_to_bdd_solver(const string &aig_file_path,
                  << endl;
         }
     }
-    cout << "Debug: Finished creating "
-         << Cudd_ReadSize(manager) /*实际创建的BDD变量数*/
+    cout << "Debug: Finished creating " << Cudd_ReadSize(manager)
          << " BDD input variables." << endl;
 
     auto bdd_var_creation_end_time = std::chrono::high_resolution_clock::now();
@@ -609,37 +561,37 @@ int aig_to_bdd_solver(const string &aig_file_path,
     cout << "LOG: Creating BDD input variables took "
          << bdd_var_creation_duration.count() << " ms." << endl;
 
-    // Create a map from CUDD variable index to original AIG PI index (0 to nI-1 in AIG file)
-    // This is useful for interpreting the assignment from DFS.
-    std::map<int, int> cudd_idx_to_original_aig_pi_file_idx;
-    for (int aig_file_idx = 0; aig_file_idx < nI; ++aig_file_idx) {
-        if (input_vars_bdd[aig_file_idx]) { // Should be populated
+    // Populate cudd_idx_to_original_aig_pi_file_idx
+    for (int aig_file_idx = 0; aig_file_idx < nI_from_header; ++aig_file_idx) {
+        if (input_vars_bdd[aig_file_idx]) {
             int cudd_var_idx = Cudd_NodeReadIndex(input_vars_bdd[aig_file_idx]);
-            if (Cudd_bddIsVar(
-                    manager,
-                    input_vars_bdd
-                        [aig_file_idx])) { // Ensure it's an actual BDD var
+            if (Cudd_bddIsVar(manager, input_vars_bdd[aig_file_idx])) {
                 cudd_idx_to_original_aig_pi_file_idx[cudd_var_idx] =
                     aig_file_idx;
             } else {
                 cerr << "Warning: input_vars_bdd[" << aig_file_idx
                      << "] with CUDD index " << cudd_var_idx
                      << " is not a simple BDD variable node." << endl;
-                // This might happen if a PI is constant or somehow optimized away before this stage, though unlikely with current setup.
             }
         } else {
             cerr << "Error: input_vars_bdd[" << aig_file_idx
-                 << "] was not populated." << endl;
-            // Handle error
+                 << "] was not populated for CUDD index mapping." << endl;
+            // This might be an issue if not all PIs from header are in ordered_aig_pi_literals_for_bdd_creation
+            // or if some PIs were not correctly mapped. Depending on strictness, could return false.
         }
     }
-    // --- MODIFICATION END: Determine BDD variable order and create variables ---
+    return true;
+}
 
-    // 5. 处理 AND 门 (A 行) - Now using pre-read and_gate_lines_for_processing
+static bool build_and_gate_bdds_from_lines(
+    DdManager *manager,
+    const std::vector<std::tuple<int, int, int>> &and_gate_lines,
+    std::map<int, DdNode *> &literal_to_bdd_map) {
     auto and_gate_processing_start_time =
         std::chrono::high_resolution_clock::now();
-    cout << "Debug: Building BDDs for " << nA << " AND gates." << endl;
-    for (const auto &gate_def : and_gate_lines_for_processing) {
+    cout << "Debug: Building BDDs for " << and_gate_lines.size()
+         << " AND gates." << endl;
+    for (const auto &gate_def : and_gate_lines) {
         int output_lit = std::get<0>(gate_def);
         int input1_lit = std::get<1>(gate_def);
         int input2_lit = std::get<2>(gate_def);
@@ -652,8 +604,7 @@ int aig_to_bdd_solver(const string &aig_file_path,
             cerr << "Error: AIGER parsing failed for AND gate (" << output_lit
                  << " = " << input1_lit << " & " << input2_lit;
             cerr << ") input literal not found in map." << endl;
-            Cudd_Quit(manager);
-            return 1;
+            return false;
         }
 
         DdNode *input1_bdd = it1->second;
@@ -673,20 +624,30 @@ int aig_to_bdd_solver(const string &aig_file_path,
             and_gate_processing_end_time - and_gate_processing_start_time);
     cout << "LOG: Processing AND gates took "
          << and_gate_processing_duration.count() << " ms." << endl;
+    return true;
+}
 
-    // 6. 获取最终输出的 BDD 节点 (第一个输出)
+static DdNode *get_final_output_bdd_node(
+    DdManager *manager,
+    int nO, // Number of outputs from AIG Header
+    const std::vector<int> &circuit_output_literals_from_aig,
+    std::map<int, DdNode *> &literal_to_bdd_map) {
     auto get_output_bdd_start_time = std::chrono::high_resolution_clock::now();
-    if (nO > 0) { // circuit_output_literals_from_aig was populated earlier
+    DdNode *bdd_circuit_output = nullptr;
+    if (nO > 0) {
         int first_output_lit = circuit_output_literals_from_aig[0];
         if (!literal_to_bdd_map.count(first_output_lit)) {
             cerr << "Error: Final output BDD node for literal "
                  << first_output_lit << " not found." << endl;
-            Cudd_Quit(manager);
-            return 1;
+            return nullptr;
         }
         bdd_circuit_output = literal_to_bdd_map[first_output_lit];
-        Cudd_Ref(bdd_circuit_output);
-    } else { /* Should have been caught by nO == 0 check */
+        Cudd_Ref(
+            bdd_circuit_output); // Important: Ref because this is THE primary output BDD
+    } else {
+        cerr << "Error: No outputs defined (nO=0), cannot get final BDD."
+             << endl;
+        return nullptr;
     }
     auto get_output_bdd_end_time = std::chrono::high_resolution_clock::now();
     auto get_output_bdd_duration =
@@ -694,28 +655,29 @@ int aig_to_bdd_solver(const string &aig_file_path,
             get_output_bdd_end_time - get_output_bdd_start_time);
     cout << "LOG: Getting final output BDD node took "
          << get_output_bdd_duration.count() << " ms." << endl;
+    return bdd_circuit_output;
+}
 
-    cout << "AIG 文件解析成功，BDD 构建初步完成。" << endl;
-
-    // --- NEW SAMPLING LOGIC ---
-    auto sampling_logic_start_time = std::chrono::high_resolution_clock::now();
-    json result_json;
-    json assignment_list = json::array();
-
+static bool read_json_variable_list(const std::string &json_path,
+                                    json &variable_list_out) {
     auto original_json_read_start_time =
         std::chrono::high_resolution_clock::now();
-    ifstream original_json_stream(original_json_path);
+    ifstream original_json_stream(json_path);
     json original_data;
     if (original_json_stream.is_open()) {
         original_json_stream >> original_data;
         original_json_stream.close();
     } else {
         cerr << "Warning: Could not open original JSON for variable info: "
-             << original_json_path << endl;
+             << json_path << endl;
+        // Decide if this is a fatal error or if an empty list is acceptable
+        variable_list_out =
+            json::array(); // Default to empty if file not found/readable
+        // return false; // Or true if a warning is acceptable
     }
-    json original_variable_list = original_data.contains("variable_list")
-                                      ? original_data["variable_list"]
-                                      : json::array();
+    variable_list_out = original_data.contains("variable_list")
+                            ? original_data["variable_list"]
+                            : json::array();
     auto original_json_read_end_time =
         std::chrono::high_resolution_clock::now();
     auto original_json_read_duration =
@@ -723,14 +685,11 @@ int aig_to_bdd_solver(const string &aig_file_path,
             original_json_read_end_time - original_json_read_start_time);
     cout << "LOG: Reading original JSON took "
          << original_json_read_duration.count() << " ms." << endl;
+    return true;
+}
 
-    if (!bdd_circuit_output) {
-        cerr << "Error: bdd_circuit_output is null before sampling." << endl;
-        Cudd_Quit(manager);
-        return 1;
-    }
-
-    // --- Perform Dynamic Programming to count paths ---
+static PathCounts perform_dp_path_counting(DdManager *manager,
+                                           DdNode *bdd_circuit_output) {
     path_counts_memo.clear(); // Clear memoization table for this BDD
     DdNode *regular_root_bdd = Cudd_Regular(bdd_circuit_output);
     cout << "LOG: Starting DP for path counting." << endl;
@@ -742,188 +701,185 @@ int aig_to_bdd_solver(const string &aig_file_path,
         dp_end_time - dp_start_time);
     cout << "LOG: DP for path counting took " << dp_duration.count() << " ms. "
          << "Memoized nodes: " << path_counts_memo.size() << endl;
+    return root_counts;
+}
+
+static void generate_and_format_samples(
+    DdManager *manager,
+    DdNode *bdd_circuit_output, // The (potentially complemented) root BDD
+    int nI,                     // Total number of PIs from AIG header
+    const std::vector<DdNode *>
+        &input_vars_bdd, // BDD nodes for PIs, indexed by original file order
+    // const std::map<int, int>& cudd_idx_to_original_aig_pi_file_idx, // For direct use if needed here
+    const PathCounts &root_counts,
+    bool
+        initial_accumulated_odd_complements, // True if bdd_circuit_output is complemented
+    int num_samples_to_generate,
+    // std::mt19937& prng, // rng is global
+    const json &original_variable_list_for_formatting,
+    json &output_assignment_list // Output
+) {
 
     __float128 total_target_paths;
-    bool initial_accumulated_odd_complements =
-        Cudd_IsComplement(bdd_circuit_output);
     if (initial_accumulated_odd_complements) {
         total_target_paths = root_counts.odd_cnt;
     } else {
         total_target_paths = root_counts.even_cnt;
     }
 
-    // Convert __float128 to string for printing, as direct cout might not work well.
     char buf[128];
     quadmath_snprintf(buf, sizeof(buf), "%.0Qf", total_target_paths);
     cout << "LOG: Total paths satisfying the 'overall even complement edges' "
-            "condition: "
-         << buf << endl;
+         << "condition: " << buf << endl;
+
+    output_assignment_list = json::array(); // Initialize output
 
     if (total_target_paths <= 0.0Q) {
         cout << "LOG: No satisfying assignments that result in an even number "
-                "of complement edges for the function."
-             << endl;
-        // assignment_list 将为空，这是正确的行为
-    } else {
-        cout << "Debug: Starting to pick " << num_samples
-             << " samples using new DFS method." << endl;
+             << "of complement edges for the function." << endl;
+        return; // assignment_list remains empty
+    }
 
-        // 声明和初始化 dist_float128
-        std::uniform_real_distribution<__float128> dist_float128(0.0Q, 1.0Q);
+    cout << "Debug: Starting to pick " << num_samples_to_generate
+         << " samples using new DFS method." << endl;
 
-        int samples_successfully_generated = 0;
-        int total_dfs_attempts = 0;
-        const int MAX_TOTAL_DFS_ATTEMPTS = num_samples * 200;
+    std::uniform_real_distribution<__float128> dist_float128(0.0Q, 1.0Q);
+    int samples_successfully_generated = 0;
+    int total_dfs_attempts = 0;
+    const int MAX_TOTAL_DFS_ATTEMPTS = num_samples_to_generate * 200;
+    std::set<std::string> unique_assignment_signatures;
+    DdNode *regular_root_bdd = Cudd_Regular(bdd_circuit_output);
 
-        // 新增：用于存储已生成的唯一解的签名，以避免重复
-        std::set<std::string> unique_assignment_signatures;
+    while (samples_successfully_generated < num_samples_to_generate &&
+           total_dfs_attempts < MAX_TOTAL_DFS_ATTEMPTS) {
+        total_dfs_attempts++;
+        std::map<int, int> current_assignment_cudd_indices;
+        bool current_sample_generation_successful = false;
 
-        while (samples_successfully_generated < num_samples &&
-               total_dfs_attempts < MAX_TOTAL_DFS_ATTEMPTS) {
-            total_dfs_attempts++; // 每次循环都增加尝试次数
-            std::map<int, int>
-                current_assignment_cudd_indices; // DFS的结果会放在这里
-            bool current_sample_generation_successful = false;
-
-            // 特殊情况处理: nI == 0 (无输入变量)
-            if (nI == 0) {
-                if (bdd_circuit_output == Cudd_ReadOne(manager) &&
-                    !initial_accumulated_odd_complements) {
-                    current_sample_generation_successful = true;
-                } else {
-                    cout << "LOG: Cannot generate sample for nI=0 case "
-                            "(unexpected, or target path count was non-zero "
-                            "for unsat case). Stopping sampling."
-                         << endl;
-                    break;
-                }
-            }
-            // 特殊情况处理: nI > 0 但BDD根是常数
-            else if (regular_root_bdd == Cudd_ReadOne(manager)) {
-                if (!initial_accumulated_odd_complements) {
-                    current_sample_generation_successful = true;
-                } else {
-                    cout << "LOG: Function is constant 1, but parity "
-                            "requirement not met. Stopping sampling."
-                         << endl;
-                    break;
-                }
-            } else if (regular_root_bdd == Cudd_ReadLogicZero(manager)) {
-                cout << "LOG: Function is constant 0. No solutions. Stopping "
-                        "sampling (should have been caught by "
-                        "total_target_paths <= 0)."
+        if (nI == 0) {
+            if (bdd_circuit_output == Cudd_ReadOne(manager) &&
+                !initial_accumulated_odd_complements) {
+                current_sample_generation_successful = true;
+            } else if (
+                Cudd_Regular(bdd_circuit_output) == Cudd_ReadOne(manager) &&
+                !initial_accumulated_odd_complements) { // Handles constant 1 case
+                current_sample_generation_successful =
+                    true; // No variables to assign
+            } else {
+                cout << "LOG: Cannot generate sample for nI=0 case "
+                        "(unexpected, or target path count was non-zero for "
+                        "unsat case). Stopping sampling."
                      << endl;
                 break;
             }
-            // 一般情况: nI > 0 且函数不是常数，执行DFS
-            else {
-                // 在调用DFS前，确保 current_assignment_cudd_indices 是空的
-                current_assignment_cudd_indices.clear();
-                current_sample_generation_successful =
-                    generate_random_solution_dfs(
-                        regular_root_bdd, initial_accumulated_odd_complements,
-                        manager, current_assignment_cudd_indices,
-                        dist_float128);
+        } else if (regular_root_bdd == Cudd_ReadOne(manager)) {
+            if (!initial_accumulated_odd_complements) {
+                current_sample_generation_successful = true;
+            } else {
+                cout << "LOG: Function is constant 1, but parity requirement "
+                        "not met. Stopping sampling."
+                     << endl;
+                break;
             }
+        } else if (regular_root_bdd == Cudd_ReadLogicZero(manager)) {
+            cout << "LOG: Function is constant 0. No solutions. Stopping "
+                    "sampling."
+                 << endl;
+            break;
+        } else {
+            current_assignment_cudd_indices.clear();
+            current_sample_generation_successful = generate_random_solution_dfs(
+                regular_root_bdd, initial_accumulated_odd_complements, manager,
+                current_assignment_cudd_indices, dist_float128);
+        }
 
-            if (current_sample_generation_successful) {
-                // --- 开始JSON格式化一个成功生成的样本 ---
-                json assignment_entry = json::array();
-                int current_bit_idx_overall = 0;
+        if (current_sample_generation_successful) {
+            json assignment_entry = json::array();
+            int current_bit_idx_overall = 0;
 
-                for (const auto &var_info : original_variable_list) {
-                    int bit_width = var_info.value("bit_width", 1);
-                    unsigned long long variable_combined_value = 0;
+            for (const auto &var_info : original_variable_list_for_formatting) {
+                int bit_width = var_info.value("bit_width", 1);
+                unsigned long long variable_combined_value = 0;
 
-                    for (int bit_k = 0; bit_k < bit_width; ++bit_k) {
-                        if (current_bit_idx_overall >= nI) {
-                            cerr << "FATAL ERROR: JSON variable structure "
-                                    "inconsistent with AIG nI ("
-                                 << current_bit_idx_overall << " >= " << nI
-                                 << "). Cannot proceed." << endl;
-                            if (bdd_circuit_output)
-                                Cudd_RecursiveDeref(manager,
-                                                    bdd_circuit_output);
-                            for (auto const &[key, val_node] :
-                                 literal_to_bdd_map)
-                                if (val_node)
-                                    Cudd_RecursiveDeref(manager, val_node);
-                            literal_to_bdd_map.clear();
-                            path_counts_memo.clear();
-                            if (manager)
-                                Cudd_Quit(manager);
-                            return 1;
-                        }
+                for (int bit_k = 0; bit_k < bit_width; ++bit_k) {
+                    if (current_bit_idx_overall >= nI) {
+                        cerr << "FATAL ERROR: JSON variable structure "
+                                "inconsistent with AIG nI ("
+                             << current_bit_idx_overall << " >= " << nI
+                             << "). Cannot proceed." << endl;
+                        // This is a critical error, ideally throw or handle more gracefully
+                        // For now, just stop generating further samples for this call.
+                        return;
+                    }
 
-                        unsigned long long bit_assignment = 0;
-                        if (nI > 0) {
-                            DdNode *pi_bdd_node =
-                                input_vars_bdd[current_bit_idx_overall];
-                            if (pi_bdd_node &&
-                                Cudd_bddIsVar(manager, pi_bdd_node)) {
-                                int cudd_var_idx =
-                                    Cudd_NodeReadIndex(pi_bdd_node);
-                                auto it_assign =
-                                    current_assignment_cudd_indices.find(
-                                        cudd_var_idx);
-                                if (it_assign !=
-                                    current_assignment_cudd_indices.end()) {
-                                    bit_assignment = it_assign->second;
-                                } else {
-                                    bit_assignment =
-                                        0; // Don't care, default to 0
-                                }
+                    unsigned long long bit_assignment = 0;
+                    if (nI > 0 &&
+                        current_bit_idx_overall < input_vars_bdd.size() &&
+                        input_vars_bdd
+                            [current_bit_idx_overall]) { // Check bounds and validity
+                        DdNode *pi_bdd_node =
+                            input_vars_bdd[current_bit_idx_overall];
+                        if (Cudd_bddIsVar(manager, pi_bdd_node)) {
+                            int cudd_var_idx = Cudd_NodeReadIndex(pi_bdd_node);
+                            auto it_assign =
+                                current_assignment_cudd_indices.find(
+                                    cudd_var_idx);
+                            if (it_assign !=
+                                current_assignment_cudd_indices.end()) {
+                                bit_assignment = it_assign->second;
                             } else {
-                                bit_assignment =
-                                    0; // PI not in BDD support or error, default to 0
+                                bit_assignment = 0; // Don't care, default to 0
                             }
+                        } else {
+                            bit_assignment =
+                                0; // PI not a simple BDD var (e.g. constant), default to 0
                         }
-                        variable_combined_value |= (bit_assignment << bit_k);
-                        current_bit_idx_overall++;
-                    } // end bit_k loop
-                    assignment_entry.push_back(
-                        {{"value",
-                          to_hex_string(variable_combined_value, bit_width)}});
-                } // end var_info loop
-                // --- 结束JSON格式化 ---
+                    } else if (nI > 0) {
+                        // This case implies current_bit_idx_overall might be >= input_vars_bdd.size()
+                        // or input_vars_bdd[current_bit_idx_overall] is null.
+                        // This could happen if JSON expects more bits than PIs available/mapped.
+                        // Or if a PI was optimized away before BDD variable creation.
+                        // cerr << "Warning: PI BDD node not available or index out of bounds for bit "
+                        //      << current_bit_idx_overall << ". Defaulting to 0." << endl;
+                        bit_assignment = 0; // Default to 0
+                    }
+                    // If nI == 0, bit_assignment remains 0, loop for bit_width will run if JSON specifies vars.
 
-                // --- 新增：检查解的唯一性 ---
-                std::string assignment_signature =
-                    assignment_entry
-                        .dump(); // 使用json对象的dump()方法生成紧凑的字符串表示作为签名
-
-                //尝试将签名插入集合中，.second 会在插入成功时为 true (即这是一个新的唯一解)
-                if (unique_assignment_signatures.insert(assignment_signature)
-                        .second) {
-                    assignment_list.push_back(assignment_entry);
-                    samples_successfully_generated++;
+                    variable_combined_value |= (bit_assignment << bit_k);
+                    current_bit_idx_overall++;
                 }
-                // --- 唯一性检查结束 ---
+                assignment_entry.push_back(
+                    {{"value",
+                      to_hex_string(variable_combined_value, bit_width)}});
             }
-        } // end while loop for sampling
-    } // end if (total_target_paths > 0.0Q)
-    // --- END NEW SAMPLING LOGIC ---
 
-    auto sampling_logic_end_time = std::chrono::high_resolution_clock::now();
-    auto sampling_logic_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            sampling_logic_end_time - sampling_logic_start_time);
-    cout << "LOG: Entire sampling logic (including JSON read, DP, and sample "
-            "picking) took "
-         << sampling_logic_duration.count() << " ms." << endl;
-
-    auto json_write_start_time = std::chrono::high_resolution_clock::now();
-    result_json["assignment_list"] = assignment_list;
-    std::ofstream output_json_stream(result_json_path);
-    if (!output_json_stream.is_open()) { /* ... error ... */
-        cerr << "Error: Could not open result JSON file for writing: "
-             << result_json_path << endl;
-        if (bdd_circuit_output)
-            Cudd_RecursiveDeref(manager, bdd_circuit_output);
-        Cudd_Quit(manager);
-        return 1;
+            std::string assignment_signature = assignment_entry.dump();
+            if (unique_assignment_signatures.insert(assignment_signature)
+                    .second) {
+                output_assignment_list.push_back(assignment_entry);
+                samples_successfully_generated++;
+            }
+        }
     }
-    output_json_stream << result_json.dump(4) << std::endl;
+    if (samples_successfully_generated < num_samples_to_generate) {
+        cout << "Warning: Generated " << samples_successfully_generated
+             << " unique samples out of " << num_samples_to_generate
+             << " requested (attempts: " << total_dfs_attempts << ")." << endl;
+    } else {
+        cout << "LOG: Successfully generated " << samples_successfully_generated
+             << " unique samples." << endl;
+    }
+}
+
+static bool write_result_json(const std::string &path, const json &data) {
+    auto json_write_start_time = std::chrono::high_resolution_clock::now();
+    std::ofstream output_json_stream(path);
+    if (!output_json_stream.is_open()) {
+        cerr << "Error: Could not open result JSON file for writing: " << path
+             << endl;
+        return false;
+    }
+    output_json_stream << data.dump(4) << std::endl;
     output_json_stream.close();
     auto json_write_end_time = std::chrono::high_resolution_clock::now();
     auto json_write_duration =
@@ -931,22 +887,19 @@ int aig_to_bdd_solver(const string &aig_file_path,
             json_write_end_time - json_write_start_time);
     cout << "LOG: Writing result JSON took " << json_write_duration.count()
          << " ms." << endl;
+    return true;
+}
 
+static void
+cleanup_cudd_resources(DdManager *manager, DdNode *bdd_circuit_output,
+                       std::map<int, DdNode *> &literal_to_bdd_map) {
     auto cudd_cleanup_start_time = std::chrono::high_resolution_clock::now();
-    if (bdd_circuit_output)
+    if (bdd_circuit_output) {
         Cudd_RecursiveDeref(manager, bdd_circuit_output);
+    }
 
-    // Dereference BDDs stored in literal_to_bdd_map
-    // This map stores BDDs for PIs and intermediate AND gates.
-    // They were Ref'd when put into the map.
     for (auto const &[key, val_node] : literal_to_bdd_map) {
         if (val_node) {
-            // Check if this node is the bdd_circuit_output that was already dereferenced.
-            // However, bdd_circuit_output might be different if it was Cudd_Not'd from map.
-            // Safe approach is to just deref all. If bdd_circuit_output was one of them,
-            // its ref count was incremented again when assigned to bdd_circuit_output.
-            // The Cudd_Ref for bdd_circuit_output itself handles one reference.
-            // The Cudd_Ref for map storage handles another. So, separate derefs are needed.
             Cudd_RecursiveDeref(manager, val_node);
         }
     }
@@ -960,6 +913,123 @@ int aig_to_bdd_solver(const string &aig_file_path,
             cudd_cleanup_end_time - cudd_cleanup_start_time);
     cout << "LOG: CUDD cleanup took " << cudd_cleanup_duration.count() << " ms."
          << endl;
+}
+
+// --- END OF HELPER FUNCTION IMPLEMENTATIONS ---
+
+// 实现主 BDD 求解器函数
+int aig_to_bdd_solver(const string &aig_file_path,
+                      const string &original_json_path, int num_samples,
+                      const string &result_json_path,
+                      unsigned int random_seed) {
+    auto function_start_time = std::chrono::high_resolution_clock::now();
+
+    rng.seed(random_seed); // Initialize global random number generator
+
+    DdManager *manager = initialize_cudd_manager(random_seed);
+    if (!manager) {
+        return 1; // Initialization failed
+    }
+
+    map<int, DdNode *> literal_to_bdd_map;
+    literal_to_bdd_map[0] =
+        Cudd_ReadLogicZero(manager); // No Ref needed for constants
+    literal_to_bdd_map[1] =
+        Cudd_ReadOne(manager); // No Ref needed for constants
+
+    int nM = 0, nI = 0, nL = 0, nO = 0, nA = 0;
+    std::vector<int> aig_primary_input_literals;
+    std::map<int, int> aig_literal_to_original_pi_index;
+    std::vector<int> circuit_output_literals_from_aig;
+    std::map<int, std::pair<int, int>> and_gate_definitions;
+    std::vector<std::tuple<int, int, int>> and_gate_lines_for_processing;
+
+    if (!parse_aig_file(
+            aig_file_path, nM, nI, nL, nO, nA, aig_primary_input_literals,
+            aig_literal_to_original_pi_index, circuit_output_literals_from_aig,
+            and_gate_definitions, and_gate_lines_for_processing)) {
+        Cudd_Quit(manager);
+        return 1;
+    }
+
+    auto var_order_start_time = std::chrono::high_resolution_clock::now();
+    std::vector<int> ordered_aig_pi_literals_for_bdd_creation =
+        determine_bdd_variable_order(nI, aig_primary_input_literals,
+                                     circuit_output_literals_from_aig,
+                                     and_gate_definitions);
+    auto var_order_end_time = std::chrono::high_resolution_clock::now();
+    auto var_order_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            var_order_end_time - var_order_start_time);
+    cout << "LOG: Determining BDD variable order took "
+         << var_order_duration.count() << " ms." << endl;
+
+    std::vector<DdNode *>
+        input_vars_bdd; // Will be sized and populated by create_bdd_variables
+    std::map<int, int> cudd_idx_to_original_aig_pi_file_idx;
+    if (!create_bdd_variables_from_ordered_pis(
+            manager, ordered_aig_pi_literals_for_bdd_creation, nI,
+            aig_literal_to_original_pi_index, literal_to_bdd_map,
+            input_vars_bdd, cudd_idx_to_original_aig_pi_file_idx)) {
+        Cudd_Quit(manager);
+        return 1;
+    }
+
+    if (!build_and_gate_bdds_from_lines(manager, and_gate_lines_for_processing,
+                                        literal_to_bdd_map)) {
+        // References for constants 0 and 1 are not managed by this map's cleanup typically
+        // but other nodes are. Safe to quit.
+        cleanup_cudd_resources(
+            manager, nullptr,
+            literal_to_bdd_map); // Pass nullptr as circuit_output not yet assigned
+        return 1;
+    }
+
+    DdNode *bdd_circuit_output = get_final_output_bdd_node(
+        manager, nO, circuit_output_literals_from_aig, literal_to_bdd_map);
+    if (!bdd_circuit_output) {
+        cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
+        return 1;
+    }
+    cout << "AIG 文件解析成功，BDD 构建初步完成。" << endl;
+
+    auto sampling_logic_start_time = std::chrono::high_resolution_clock::now();
+    json result_json_output_data; // For storing final assignments
+    json original_variable_list_from_json;
+
+    if (!read_json_variable_list(original_json_path,
+                                 original_variable_list_from_json)) {
+        // Proceed with empty original_variable_list if non-fatal, or handle error
+        // For now, assumes read_json_variable_list logs warning and continues
+    }
+
+    PathCounts root_counts =
+        perform_dp_path_counting(manager, bdd_circuit_output);
+    bool initial_odd_complements = Cudd_IsComplement(bdd_circuit_output);
+
+    json
+        assignment_list_for_json; // This will be populated by generate_and_format_samples
+    generate_and_format_samples(
+        manager, bdd_circuit_output, nI,
+        input_vars_bdd, /*cudd_idx_to_original_aig_pi_file_idx,*/
+        root_counts, initial_odd_complements, num_samples,
+        original_variable_list_from_json, assignment_list_for_json);
+
+    auto sampling_logic_end_time = std::chrono::high_resolution_clock::now();
+    auto sampling_logic_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            sampling_logic_end_time - sampling_logic_start_time);
+    cout << "LOG: Entire sampling logic (including JSON read, DP, and sample "
+         << "picking) took " << sampling_logic_duration.count() << " ms."
+         << endl;
+
+    result_json_output_data["assignment_list"] = assignment_list_for_json;
+    if (!write_result_json(result_json_path, result_json_output_data)) {
+        cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
+        return 1;
+    }
+
+    cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
 
     std::cout << "BDD 求解器完成。结果已写入到 " << result_json_path
               << std::endl;
@@ -1068,13 +1138,8 @@ static std::vector<int> determine_bdd_variable_order(
                 order_dfs_main(inputs.first);
             }
         }
-        // 如果节点不是PI，不是0/1，也不在and_gate_definitions中，
-        // 可能是AIG结构问题或未处理的叶节点类型。
     };
 
-    // 从主输出开始DFS进行变量排序
-    // 为简单起见，这里只处理第一个主输出。
-    // 更通用的方案可能需要处理所有PO或构建一个组合PO。
     if (!circuit_output_literals_from_aig.empty()) {
         int main_po_lit = circuit_output_literals_from_aig[0];
         std::cout
@@ -1087,22 +1152,17 @@ static std::vector<int> determine_bdd_variable_order(
                   << std::endl;
     }
 
-    // 回退步骤：添加任何未从PO通过DFS访问到的PI
-    // （确保所有在AIG文件中定义的PI都在排序列表中，即使它们是未使用的或仅与其他PO相关）
-    // 按照它们在AIG文件中的原始顺序迭代，以保证这部分添加的稳定性
     for (int pi_lit_from_file : aig_primary_input_literals) {
         int regular_pi_lit = (pi_lit_from_file / 2) * 2;
-        if (all_pi_literals_set.count(regular_pi_lit)) { // 再次确认是有效的PI
+        if (all_pi_literals_set.count(regular_pi_lit)) {
             if (added_pis_to_final_order_set.find(regular_pi_lit) ==
                 added_pis_to_final_order_set.end()) {
                 ordered_pis_for_bdd_creation.push_back(regular_pi_lit);
                 added_pis_to_final_order_set.insert(regular_pi_lit);
-                // std::cout << "Debug: Adding fallback PI to order (not reached from PO DFS): " << regular_pi_lit << std::endl;
             }
         }
     }
 
-    // 合理性检查和日志输出
     if (ordered_pis_for_bdd_creation.size() != all_pi_literals_set.size() &&
         !aig_primary_input_literals.empty()) {
         std::cout << "Warning: Final ordered PI count ("
@@ -1110,7 +1170,6 @@ static std::vector<int> determine_bdd_variable_order(
                   << ") does not match unique PI count from AIG file ("
                   << all_pi_literals_set.size() << ")." << std::endl;
     }
-    // 与AIG头中的nI进行比较
     if (all_pi_literals_set.size() != (size_t)nI_total_from_header) {
         std::cout << "Warning: Count of unique PIs from AIG file ("
                   << all_pi_literals_set.size()
@@ -1121,7 +1180,7 @@ static std::vector<int> determine_bdd_variable_order(
     std::cout
         << "Debug: BDD variable order determined. Total variables in order: "
         << ordered_pis_for_bdd_creation.size() << ". Order: ";
-    size_t print_limit = 20; // 限制打印的PI数量，避免过长的日志
+    size_t print_limit = 20;
     for (size_t i = 0; i < ordered_pis_for_bdd_creation.size(); ++i) {
         if (ordered_pis_for_bdd_creation.size() <= print_limit * 2 ||
             i < print_limit ||
