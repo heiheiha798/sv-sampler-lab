@@ -15,11 +15,14 @@ sudo apt install -y \
     clang \
     flex bison \
     libreadline-dev \
-    libboost-all-dev \
-    gawk\
-    automake\
-    autoconf\
-    libtool
+    libgcc-11-dev \
+    gfortran \
+    gawk \
+    automake \
+    autoconf \
+    libtool \
+    gcc \
+    g++
 git submodule update --init --recursive
 
 echo "Compiling Yosys..."

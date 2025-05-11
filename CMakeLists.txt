@@ -25,17 +25,17 @@ elif(CUDD_FOUND AND CUDD_LIBRARIES AND CUDD_INCLUDE_DIRS)
 else()
     message(STATUS "CUDD package not found by find_package, trying to find manually.")
     find_path(CUDD_INCLUDE_DIR cudd.h
-              HINTS ENV CUDD_DIR /usr/local /usr
-              PATH_SUFFIXES include include/cudd) # cudd.h 可能在 include/ 或 include/cudd/
+            HINTS ENV CUDD_DIR /usr/local /usr
+            PATH_SUFFIXES include include/cudd) # cudd.h 可能在 include/ 或 include/cudd/
     find_library(CUDD_LIBRARY NAMES cudd.a cudd
-                 HINTS ENV CUDD_DIR /usr/local /usr
-                 PATH_SUFFIXES lib lib64)
+                HINTS ENV CUDD_DIR /usr/local /usr
+                PATH_SUFFIXES lib lib64)
 
     if(CUDD_INCLUDE_DIR AND CUDD_LIBRARY)
         add_library(CUDD::cudd STATIC IMPORTED)
         set_target_properties(CUDD::cudd PROPERTIES
-                              IMPORTED_LOCATION "${CUDD_LIBRARY}"
-                              INTERFACE_INCLUDE_DIRECTORIES "${CUDD_INCLUDE_DIR}")
+                                IMPORTED_LOCATION "${CUDD_LIBRARY}"
+                                INTERFACE_INCLUDE_DIRECTORIES "${CUDD_INCLUDE_DIR}")
         message(STATUS "Found CUDD manually: ${CUDD_LIBRARY} (include: ${CUDD_INCLUDE_DIR})")
     else()
         message(FATAL_ERROR "CUDD library or headers not found. Searched CUDD_INCLUDE_DIR=${CUDD_INCLUDE_DIR}, CUDD_LIBRARY=${CUDD_LIBRARY}. Please ensure CUDD is installed (e.g., in /usr/local) or set CUDD_DIR environment variable.")
@@ -71,6 +71,7 @@ add_executable(MySolver src/main.cpp src/json_v_converter.cpp src/aig_bdd_solver
 # 链接库
 target_link_libraries(MySolver PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(MySolver PRIVATE CUDD::cudd)
+target_link_libraries(MySolver PRIVATE quadmath) # <--- 新增此行
 
 # 如果需要，可以添加其他编译选项或包含目录
 # target_include_directories(MySolver PRIVATE ${SOME_OTHER_INCLUDE_DIR})
