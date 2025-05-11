@@ -34,6 +34,149 @@ using namespace std;
 // Forward declaration of helper, implementation unchanged
 string to_hex_string(unsigned long long value, int bit_width);
 
+// 前向声明PI支持集计算的递归辅助函数
+static void get_pi_support_for_node_dfs_recursive(
+    int current_literal,
+    const std::map<int, std::pair<int, int>> &and_gate_definitions,
+    const std::set<int> &all_pi_literals_set, std::set<int> &node_pi_support,
+    std::set<int> &visited_for_this_support_dfs,
+    std::map<int, std::set<int>> &memoized_supports);
+
+// 获取节点PI支持集的主函数（带记忆化）
+static std::set<int>
+get_pi_support(int literal,
+               const std::map<int, std::pair<int, int>> &and_gate_definitions,
+               const std::set<int> &all_pi_literals_set,
+               std::map<int, std::set<int>> &memoized_supports) {
+
+    int regular_lit = (literal / 2) * 2;
+    // 常量0或1没有PI支持 (AIG文字0和1)
+    if (regular_lit == 0 || regular_lit == 1) {
+        return {};
+    }
+
+    // 检查是否已有记忆化的结果
+    auto memo_it = memoized_supports.find(regular_lit);
+    if (memo_it != memoized_supports.end()) {
+        return memo_it->second;
+    }
+
+    std::set<int> support;
+    std::set<int>
+        visited_dfs_for_this_call; // 为本次顶层调用创建新的visited集合
+    // 调用递归辅助函数进行实际计算
+    get_pi_support_for_node_dfs_recursive(
+        regular_lit, and_gate_definitions, all_pi_literals_set, support,
+        visited_dfs_for_this_call, memoized_supports);
+
+    // 存储计算结果到记忆化map中
+    memoized_supports[regular_lit] = support;
+    return support;
+}
+
+// PI支持集计算的递归DFS实现
+static void get_pi_support_for_node_dfs_recursive(
+    int current_literal, // 初始调用时应传入规整形式 (regular form)
+    const std::map<int, std::pair<int, int>> &and_gate_definitions,
+    const std::set<int> &all_pi_literals_set,
+    std::set<int> &node_pi_support, // 输出: 为此节点找到的PIs
+    std::set<int>
+        &visited_for_this_support_dfs, // 用于此DFS调用的访问过的节点集合
+    std::map<int, std::set<int>> &memoized_supports) { // 全局记忆化map
+
+    int regular_literal = (current_literal / 2) * 2;
+
+    if (regular_literal == 0 || regular_literal == 1)
+        return; // 基本常量情况
+
+    // 如果在此DFS路径中已访问过此节点，则返回以避免循环
+    if (visited_for_this_support_dfs.count(regular_literal))
+        return;
+    visited_for_this_support_dfs.insert(regular_literal);
+
+    // 如果当前节点是PI
+    if (all_pi_literals_set.count(regular_literal)) {
+        node_pi_support.insert(regular_literal);
+        // 将PI自身的support（即它自己）存入全局记忆化，如果尚不存在
+        if (memoized_supports.find(regular_literal) ==
+            memoized_supports.end()) {
+            memoized_supports[regular_literal] = {regular_literal};
+        }
+        return;
+    }
+
+    // 在重新计算前，先检查全局记忆化map中是否已有此非PI节点的支持集
+    // 这对于处理共享子逻辑非常重要
+    auto memo_it = memoized_supports.find(regular_literal);
+    if (memo_it != memoized_supports.end()) {
+        const auto &cached_support = memo_it->second;
+        node_pi_support.insert(cached_support.begin(), cached_support.end());
+        return; // 使用缓存结果并返回
+    }
+
+    // 如果是AND门
+    auto it_and_def = and_gate_definitions.find(regular_literal);
+    if (it_and_def != and_gate_definitions.end()) {
+        const auto &inputs = it_and_def->second;
+        // 对子节点递归调用顶层的 get_pi_support 函数，以利用其对子节点的记忆化查询
+        std::set<int> support1 =
+            get_pi_support(inputs.first, and_gate_definitions,
+                           all_pi_literals_set, memoized_supports);
+        std::set<int> support2 =
+            get_pi_support(inputs.second, and_gate_definitions,
+                           all_pi_literals_set, memoized_supports);
+
+        node_pi_support.insert(support1.begin(), support1.end());
+        node_pi_support.insert(support2.begin(), support2.end());
+    }
+    // 如果节点不是PI，也不是AND门定义（例如，一个未连接的AIG节点或错误），则其支持集为空（或已收集到的）
+
+    // 在此DFS路径探索完成后，将计算得到的支持集存入全局记忆化map
+    // 确保不会覆盖由其他路径可能已为该节点计算并存储的（可能更完整的）支持集
+    // （get_pi_support的顶层调用会处理最终的存储）
+    // 此处的memoized_supports[regular_literal] = node_pi_support; 已移至get_pi_support的顶层调用后。
+    // 在这里，我们只是累加到 node_pi_support。
+}
+
+// Helper function to perform DFS from a node to collect all PI literals in its support.
+// This function is internal to determine_bdd_variable_order's needs or could be a static helper.
+static void get_pi_support_for_component_dfs(
+    int current_literal,
+    const std::map<int, std::pair<int, int>> &and_gate_definitions,
+    const std::set<int> &all_pi_literals_set,
+    std::set<int> &component_pi_support, // Output: PIs found for this component
+    std::set<int>
+        &visited_for_support_dfs) { // Tracks visited nodes for THIS DFS call
+
+    int regular_literal = (current_literal / 2) * 2;
+
+    if (regular_literal == 0 ||
+        regular_literal == 1) { // Constants 0 or 1 (literal 1)
+        return;
+    }
+    if (visited_for_support_dfs.count(regular_literal)) {
+        return;
+    }
+    visited_for_support_dfs.insert(regular_literal);
+
+    if (all_pi_literals_set.count(regular_literal)) {
+        component_pi_support.insert(regular_literal);
+        return;
+    }
+
+    auto it = and_gate_definitions.find(regular_literal);
+    if (it != and_gate_definitions.end()) {
+        const auto &inputs = it->second;
+        get_pi_support_for_component_dfs(
+            inputs.first, and_gate_definitions, all_pi_literals_set,
+            component_pi_support, visited_for_support_dfs);
+        get_pi_support_for_component_dfs(
+            inputs.second, and_gate_definitions, all_pi_literals_set,
+            component_pi_support, visited_for_support_dfs);
+    }
+    // If not a PI and not in and_gate_definitions, it's an isolated node or error (or literal 1 if not handled as constant earlier)
+}
+
 // --- NEW HELPER FUNCTION PROTOTYPE for variable ordering ---
 static std::vector<int> determine_bdd_variable_order(
     int nI_total,
@@ -235,6 +378,10 @@ int aig_to_bdd_solver(const string &aig_file_path,
          << cudd_init_duration.count() << " ms." << endl;
 
     map<int, DdNode *> literal_to_bdd_map;
+
+    literal_to_bdd_map[0] = Cudd_ReadLogicZero(manager);
+    literal_to_bdd_map[1] = Cudd_ReadOne(manager);
+
     ifstream aig_file_stream(aig_file_path);
     if (!aig_file_stream.is_open()) {
         cerr << "Error: Could not open AIG file: " << aig_file_path << endl;
@@ -364,12 +511,17 @@ int aig_to_bdd_solver(const string &aig_file_path,
     auto var_order_start_time = std::chrono::high_resolution_clock::now();
     vector<DdNode *> input_vars_bdd(
         nI); // This will store DdNode* for PIs, indexed by their original AIG
-             // file order (0 to nI-1)
+             // file order (0 to nI-1). nI is from AIG header.
 
+    // 调用修改后的 determine_bdd_variable_order 函数
+    // 参数 nI 是从AIG头中读取的输入数量，这应该与 aig_primary_input_literals.size() 相符
     std::vector<int> ordered_aig_pi_literals_for_bdd_creation =
         determine_bdd_variable_order(nI, aig_primary_input_literals,
                                      circuit_output_literals_from_aig,
                                      and_gate_definitions);
+    // 注意：这里传递的 nI 是来自 AIG header 的 MILOA 中的 'I'。
+    // determine_bdd_variable_order 内部逻辑需要确保处理的 PI 数量与此一致或基于 aig_primary_input_literals.size()
+
     auto var_order_end_time = std::chrono::high_resolution_clock::now();
     auto var_order_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -379,39 +531,40 @@ int aig_to_bdd_solver(const string &aig_file_path,
 
     auto bdd_var_creation_start_time =
         std::chrono::high_resolution_clock::now();
-    cout << "Debug: Creating " << nI
-         << " BDD input variables based on determined order." << endl;
-    for (int i = 0; i < nI; ++i) { // i is the CUDD variable index (level)
-        int current_aig_pi_literal_to_create;
-        if (i < ordered_aig_pi_literals_for_bdd_creation.size()) {
-            current_aig_pi_literal_to_create =
-                ordered_aig_pi_literals_for_bdd_creation[i];
-        } else {
-            bool found_uncreated = false;
-            for (int orig_pi_lit : aig_primary_input_literals) {
-                if (literal_to_bdd_map.find(orig_pi_lit) ==
-                    literal_to_bdd_map.end()) {
-                    current_aig_pi_literal_to_create = orig_pi_lit;
-                    found_uncreated = true;
-                    break;
-                }
-            }
-            if (!found_uncreated) {
-                cerr << "Error: Logic flaw in assigning remaining PIs for BDD "
-                        "creation."
-                     << endl;
-                Cudd_Quit(manager);
-                return 1;
-            }
-            cout << "Warning: Fallback PI assignment for BDD var creation: "
-                 << current_aig_pi_literal_to_create << endl;
+    cout << "Debug: Creating "
+         << ordered_aig_pi_literals_for_bdd_creation
+                .size() // 使用实际得到的排序后PI数量
+         << " BDD input variables based on determined order (AIG header nI: "
+         << nI << ")." << endl;
+
+    if (ordered_aig_pi_literals_for_bdd_creation.size() > (size_t)nI) {
+        cout << "Warning: Number of PIs in determined order ("
+             << ordered_aig_pi_literals_for_bdd_creation.size()
+             << ") is greater than nI from header (" << nI
+             << "). Using determined order size." << endl;
+    }
+
+    for (size_t i = 0; i < ordered_aig_pi_literals_for_bdd_creation.size();
+         ++i) {
+        int current_aig_pi_literal_to_create =
+            ordered_aig_pi_literals_for_bdd_creation[i];
+
+        // 检查这个PI是否已经在map中（理论上不应该，因为是按顺序第一次创建）
+        if (literal_to_bdd_map.count(current_aig_pi_literal_to_create)) {
+            cerr << "Error: PI literal " << current_aig_pi_literal_to_create
+                 << " already has a BDD node before creation in ordered list. "
+                    "Logic error."
+                 << endl;
+            // ... 错误处理 ...
+            return 1;
         }
 
         DdNode *var_node =
-            Cudd_bddNewVar(manager); // Creates BDD var at level 'i'
-        if (!var_node) {             /* Error handling */
+            Cudd_bddNewVar(manager); // Creates BDD var at CUDD level 'i'
+        if (!var_node) {             /* ... Error handling ... */
             cerr << "Cudd_bddNewVar failed for PI "
-                 << current_aig_pi_literal_to_create << endl;
+                 << current_aig_pi_literal_to_create << " at CUDD index " << i
+                 << endl;
             Cudd_Quit(manager);
             return 1;
         }
@@ -419,19 +572,36 @@ int aig_to_bdd_solver(const string &aig_file_path,
         literal_to_bdd_map[current_aig_pi_literal_to_create] = var_node;
         literal_to_bdd_map[current_aig_pi_literal_to_create + 1] =
             Cudd_Not(var_node);
-        Cudd_Ref(
-            var_node); // Cudd_bddNewVar result does not need Ref initially,
-        // but if stored and used multiple times, Ref/Deref needed.
-        // Let's assume map takes ownership via Ref.
+        Cudd_Ref(var_node);
         Cudd_Ref(Cudd_Not(var_node));
 
-        int original_pi_idx =
-            aig_literal_to_original_pi_index[current_aig_pi_literal_to_create];
-        input_vars_bdd[original_pi_idx] =
-            var_node; // var_node here is the BDD var for this PI.
-                      // Its CUDD index is `i`.
+        // 更新 input_vars_bdd：通过AIG literal找到它在原始AIG输入列表中的索引
+        auto it_orig_idx = aig_literal_to_original_pi_index.find(
+            current_aig_pi_literal_to_create);
+        if (it_orig_idx != aig_literal_to_original_pi_index.end()) {
+            int original_pi_file_order_idx = it_orig_idx->second;
+            if (original_pi_file_order_idx <
+                nI) { // 确保索引在 input_vars_bdd 的界限内
+                input_vars_bdd[original_pi_file_order_idx] = var_node;
+            } else {
+                cerr << "Warning: Original PI index "
+                     << original_pi_file_order_idx << " for literal "
+                     << current_aig_pi_literal_to_create
+                     << " is out of bounds for input_vars_bdd (size " << nI
+                     << ")." << endl;
+            }
+        } else {
+            cerr << "Warning: AIG PI literal "
+                 << current_aig_pi_literal_to_create
+                 << " from ordering not found in "
+                    "aig_literal_to_original_pi_index map."
+                 << endl;
+        }
     }
-    cout << "Debug: Finished creating BDD input variables." << endl;
+    cout << "Debug: Finished creating "
+         << Cudd_ReadSize(manager) /*实际创建的BDD变量数*/
+         << " BDD input variables." << endl;
+
     auto bdd_var_creation_end_time = std::chrono::high_resolution_clock::now();
     auto bdd_var_creation_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -837,62 +1007,135 @@ string to_hex_string(unsigned long long value, int bit_width) {
     return hex_str;
 }
 
-// --- NEW HELPER FUNCTION IMPLEMENTATION for variable ordering ---
+// 主变量排序函数
 static std::vector<int> determine_bdd_variable_order(
-    int nI_total, const std::vector<int> &aig_primary_input_literals,
+    int nI_total_from_header,
+    const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    cout << "Debug: Determining BDD variable order..." << endl;
+    std::cout << "Debug: Determining BDD variable order (DFS with PI support "
+                 "heuristic for AND children)..."
+              << std::endl;
     std::vector<int> ordered_pis_for_bdd_creation;
+    std::set<int> added_pis_to_final_order_set;
+    std::set<int> all_pi_literals_set(aig_primary_input_literals.begin(),
+                                      aig_primary_input_literals.end());
+    std::map<int, std::set<int>> memoized_pi_supports;
     std::set<int> visited_nodes_for_ordering_dfs;
-    std::set<int> added_pis_to_order;
-    std::set<int> primary_input_set;
-    for (int pi_lit : aig_primary_input_literals) {
-        primary_input_set.insert(pi_lit);
-    }
-
-    std::function<void(int)> order_dfs = [&](int current_node_literal) {
+    std::function<void(int)> order_dfs_main = [&](int current_node_literal) {
         int regular_node_lit = (current_node_literal / 2) * 2;
 
+        // 基本情况：常量0或1没有变量需要排序
+        if (regular_node_lit == 0 || regular_node_lit == 1)
+            return;
+
+        // 如果此节点在主排序DFS中已访问过，则返回
         if (visited_nodes_for_ordering_dfs.count(regular_node_lit)) {
             return;
         }
         visited_nodes_for_ordering_dfs.insert(regular_node_lit);
 
-        // Check if it's a primary input
-        if (primary_input_set.count(regular_node_lit)) {
-            if (added_pis_to_order.find(regular_node_lit) ==
-                added_pis_to_order.end()) {
+        // 如果当前节点是PI
+        if (all_pi_literals_set.count(regular_node_lit)) {
+            // 如果此PI尚未添加到最终排序列表中
+            if (added_pis_to_final_order_set.find(regular_node_lit) ==
+                added_pis_to_final_order_set.end()) {
                 ordered_pis_for_bdd_creation.push_back(regular_node_lit);
-                added_pis_to_order.insert(regular_node_lit);
+                added_pis_to_final_order_set.insert(regular_node_lit);
             }
-            return; // Stop recursion at PIs
+            return; // DFS在此路径到达PI后终止
         }
 
-        // Check if it's an AND gate output
-        auto it = and_gate_definitions.find(regular_node_lit);
-        if (it != and_gate_definitions.end()) {
-            const auto &inputs = it->second;
-            order_dfs(inputs.first);  // RHS1
-            order_dfs(inputs.second); // RHS2
+        // 如果当前节点是AND门
+        auto it_and = and_gate_definitions.find(regular_node_lit);
+        if (it_and != and_gate_definitions.end()) {
+            const auto &inputs = it_and->second;
+
+            // 启发式：根据AND门子节点的PI支持集大小来决定递归顺序
+            std::set<int> support1 =
+                get_pi_support(inputs.first, and_gate_definitions,
+                               all_pi_literals_set, memoized_pi_supports);
+            std::set<int> support2 =
+                get_pi_support(inputs.second, and_gate_definitions,
+                               all_pi_literals_set, memoized_pi_supports);
+
+            // 优先处理PI支持集较小（或相等）的子节点
+            if (support1.size() <= support2.size()) {
+                order_dfs_main(inputs.first);
+                order_dfs_main(inputs.second);
+            } else {
+                order_dfs_main(inputs.second);
+                order_dfs_main(inputs.first);
+            }
         }
+        // 如果节点不是PI，不是0/1，也不在and_gate_definitions中，
+        // 可能是AIG结构问题或未处理的叶节点类型。
     };
 
-    // Start DFS from each primary output of the circuit
-    for (int output_lit : circuit_output_literals_from_aig) {
-        if (output_lit == 0 || output_lit == 1)
-            continue; // Skip constant outputs for DFS start
-        order_dfs(output_lit);
+    // 从主输出开始DFS进行变量排序
+    // 为简单起见，这里只处理第一个主输出。
+    // 更通用的方案可能需要处理所有PO或构建一个组合PO。
+    if (!circuit_output_literals_from_aig.empty()) {
+        int main_po_lit = circuit_output_literals_from_aig[0];
+        std::cout
+            << "Debug: Starting variable ordering DFS from Main PO Literal: "
+            << main_po_lit << std::endl;
+        order_dfs_main(main_po_lit);
+    } else {
+        std::cout << "Warning: No primary outputs found in AIG for variable "
+                     "ordering strategy."
+                  << std::endl;
     }
 
-    if (ordered_pis_for_bdd_creation.size() < nI_total) {
-        for (int pi_lit : aig_primary_input_literals) {
-            if (added_pis_to_order.find(pi_lit) == added_pis_to_order.end()) {
-                ordered_pis_for_bdd_creation.push_back(pi_lit);
-                added_pis_to_order.insert(pi_lit);
+    // 回退步骤：添加任何未从PO通过DFS访问到的PI
+    // （确保所有在AIG文件中定义的PI都在排序列表中，即使它们是未使用的或仅与其他PO相关）
+    // 按照它们在AIG文件中的原始顺序迭代，以保证这部分添加的稳定性
+    for (int pi_lit_from_file : aig_primary_input_literals) {
+        int regular_pi_lit = (pi_lit_from_file / 2) * 2;
+        if (all_pi_literals_set.count(regular_pi_lit)) { // 再次确认是有效的PI
+            if (added_pis_to_final_order_set.find(regular_pi_lit) ==
+                added_pis_to_final_order_set.end()) {
+                ordered_pis_for_bdd_creation.push_back(regular_pi_lit);
+                added_pis_to_final_order_set.insert(regular_pi_lit);
+                // std::cout << "Debug: Adding fallback PI to order (not reached from PO DFS): " << regular_pi_lit << std::endl;
             }
         }
     }
+
+    // 合理性检查和日志输出
+    if (ordered_pis_for_bdd_creation.size() != all_pi_literals_set.size() &&
+        !aig_primary_input_literals.empty()) {
+        std::cout << "Warning: Final ordered PI count ("
+                  << ordered_pis_for_bdd_creation.size()
+                  << ") does not match unique PI count from AIG file ("
+                  << all_pi_literals_set.size() << ")." << std::endl;
+    }
+    // 与AIG头中的nI进行比较
+    if (all_pi_literals_set.size() != (size_t)nI_total_from_header) {
+        std::cout << "Warning: Count of unique PIs from AIG file ("
+                  << all_pi_literals_set.size()
+                  << ") does not match nI from AIG header ("
+                  << nI_total_from_header << ")." << std::endl;
+    }
+
+    std::cout
+        << "Debug: BDD variable order determined. Total variables in order: "
+        << ordered_pis_for_bdd_creation.size() << ". Order: ";
+    size_t print_limit = 20; // 限制打印的PI数量，避免过长的日志
+    for (size_t i = 0; i < ordered_pis_for_bdd_creation.size(); ++i) {
+        if (ordered_pis_for_bdd_creation.size() <= print_limit * 2 ||
+            i < print_limit ||
+            i >= ordered_pis_for_bdd_creation.size() - print_limit) {
+            std::cout << ordered_pis_for_bdd_creation[i]
+                      << (i == ordered_pis_for_bdd_creation.size() - 1 ? ""
+                                                                       : ", ");
+        } else if (i == print_limit) {
+            std::cout << "... ("
+                      << (ordered_pis_for_bdd_creation.size() - 2 * print_limit)
+                      << " more PIs) ..., ";
+        }
+    }
+    std::cout << std::endl;
 
     return ordered_pis_for_bdd_creation;
 }
