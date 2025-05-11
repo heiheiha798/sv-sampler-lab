@@ -775,12 +775,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
                         .second) {
                     assignment_list.push_back(assignment_entry);
                     samples_successfully_generated++;
-                } else {
-                    // 如果插入失败，说明这个解已经生成过了，是重复的。
-                    // 不增加 samples_successfully_generated 计数，循环将继续尝试。
-                    // 可以选择性地打印一条调试信息：
-                    // cout << "Debug: Generated a duplicate assignment (attempt "
-                    //      << total_dfs_attempts << "), skipping." << endl;
                 }
                 // --- 唯一性检查结束 ---
             }
@@ -788,13 +782,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
             // total_dfs_attempts 已经增加，循环将继续，
             // samples_successfully_generated 不会增加。
         } // end while loop for sampling
-
-        if (samples_successfully_generated < num_samples) {
-            cout << "Warning: Only generated " << samples_successfully_generated
-                 << " valid samples out of " << num_samples
-                 << " requested after " << total_dfs_attempts
-                 << " total DFS attempts." << endl;
-        }
     } // end if (total_target_paths > 0.0Q)
     // --- END NEW SAMPLING LOGIC ---
 
