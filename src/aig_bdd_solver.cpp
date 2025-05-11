@@ -36,23 +36,16 @@ string to_hex_string(unsigned long long value, int bit_width);
 
 // --- NEW HELPER FUNCTION PROTOTYPE for variable ordering ---
 static std::vector<int> determine_bdd_variable_order(
-    int nI_total,
-    const std::vector<int>
-        &aig_primary_input_literals, // Literals as read from AIG PI section
-    const std::vector<int>
-        &circuit_output_literals_from_aig, // AIG output literals
-    const std::map<int, std::pair<int, int>>
-        &and_gate_definitions // LHS -> {RHS1, RHS2}
-);
+    int nI_total, const std::vector<int> &aig_primary_input_literals,
+    const std::vector<int> &circuit_output_literals_from_aig,
+    const std::map<int, std::pair<int, int>> &and_gate_definitions);
 
 // --- START OF MODIFICATIONS FOR NEW SAMPLING ---
 
 // Structure to store path counts for dynamic programming
 struct PathCounts {
-    __float128
-        even_cnt; // Paths with an even number of complemented edges to 1-terminal
-    __float128
-        odd_cnt; // Paths with an odd number of complemented edges to 1-terminal
+    __float128 even_cnt;
+    __float128 odd_cnt;
 };
 
 // Global map for memoization in path counting DP
@@ -64,12 +57,10 @@ static std::mt19937 rng;
 PathCounts compute_path_counts_recursive(DdNode *node_regular,
                                          DdManager *manager) {
     if (node_regular == Cudd_ReadOne(manager)) {
-        return {
-            1.0Q,
-            0.0Q}; // One path (empty) with 0 complemented edges to 1-terminal
+        return {1.0Q, 0.0Q};
     }
     if (node_regular == Cudd_ReadLogicZero(manager)) {
-        return {0.0Q, 0.0Q}; // No path to 1-terminal
+        return {0.0Q, 0.0Q};
     }
 
     auto it = path_counts_memo.find(node_regular);
@@ -117,104 +108,71 @@ PathCounts compute_path_counts_recursive(DdNode *node_regular,
 // DFS function to generate a random solution
 // assignment_map: CUDD variable index -> 0 or 1
 bool generate_random_solution_dfs(
-    DdNode *current_node_regular,
-    bool
-        accumulated_odd_complements_so_far, // 从主BDD根（考虑其初始补码状态）到 current_node_regular 的父节点，
-    // 其路径上的有效补数边数量是否为奇数。
-    DdManager *manager,
-    std::map<int, int> &assignment_map, // 输出：CUDD变量索引 -> 0 或 1
-    std::uniform_real_distribution<__float128>
-        &dist // 随机数分布 (假设已解决nextafter问题)
-) {
+    DdNode *current_node_regular, bool accumulated_odd_complements_so_far,
+    DdManager *manager, std::map<int, int> &assignment_map,
+    std::uniform_real_distribution<__float128> &dist) {
     // 基本情况1：成功到达1-terminal。
-    // 到此的路径选择已确保满足整体偶数补数边的目标。
     if (current_node_regular == Cudd_ReadOne(manager)) {
-        // （可选）最终检查 accumulated_odd_complements_so_far 是否确实为 false。
-        // 如果之前的逻辑正确，它应该是 false。
-        // if (accumulated_odd_complements_so_far) {
-        //     cerr << "Warning: DFS reached 1-terminal, but accumulated_odd_complements_so_far is true." << endl;
-        // }
         return true; // 成功找到通往1-terminal的路径段。
     }
 
     // 基本情况2：到达0-terminal。此路径无效，不能满足函数。
     if (current_node_regular == Cudd_ReadLogicZero(manager)) {
-        // 为避免过多输出，可以将此cerr设为调试模式下才打印
-        // cerr << "Debug: DFS reached 0-terminal. This path is invalid." << endl;
         return false; // 路径无法导向一个解。
     }
 
     // 递归步骤：处理内部BDD节点
-    DdNode *E_child_ptr =
-        Cudd_E(current_node_regular); // Else子节点指针 (可能带补码)
-    DdNode *T_child_ptr =
-        Cudd_T(current_node_regular); // Then子节点指针 (可能带补码)
+    DdNode *E_child_ptr = Cudd_E(current_node_regular);
+    DdNode *T_child_ptr = Cudd_T(current_node_regular);
 
-    DdNode *E_child_regular = Cudd_Regular(E_child_ptr); // Else子节点的正则形式
-    DdNode *T_child_regular = Cudd_Regular(T_child_ptr); // Then子节点的正则形式
+    DdNode *E_child_regular = Cudd_Regular(E_child_ptr);
+    DdNode *T_child_regular = Cudd_Regular(T_child_ptr);
 
-    bool is_complement_E =
-        Cudd_IsComplement(E_child_ptr); // 到Else子节点的边是否是补数边?
-    bool is_complement_T =
-        Cudd_IsComplement(T_child_ptr); // 到Then子节点的边是否是补数边?
+    bool is_complement_E = Cudd_IsComplement(E_child_ptr);
+    bool is_complement_T = Cudd_IsComplement(T_child_ptr);
 
     // 获取从子节点（正则形式）到1-terminal的路径计数。
-    // 这会调用主要的DP函数，该函数能处理終端節點和备忘录。
     PathCounts counts_from_E_child =
         compute_path_counts_recursive(E_child_regular, manager);
     PathCounts counts_from_T_child =
         compute_path_counts_recursive(T_child_regular, manager);
 
     // 确定从子节点的正则形式到1-terminal的路径所需的奇偶性，
-    // 以使得从BDD根节点经由此子节点到1-terminal的整个路径具有偶数条补数边。
-    // 目标: overall_parity = false (偶数).
-    //       overall_parity = accumulated_odd_complements_so_far ^ edge_complement ^ path_from_child_complement
-    // 因此: path_from_child_complement = accumulated_odd_complements_so_far ^ edge_complement
-
     bool required_odd_parity_for_E_path =
         accumulated_odd_complements_so_far ^ is_complement_E;
     __float128 cnt_paths_via_E;
-    if (required_odd_parity_for_E_path) { // 需要从 E_child_regular 出发的路径是奇数补数边
+    if (required_odd_parity_for_E_path) {
         cnt_paths_via_E = counts_from_E_child.odd_cnt;
-    } else { // 需要从 E_child_regular 出发的路径是偶数补数边
+    } else {
         cnt_paths_via_E = counts_from_E_child.even_cnt;
     }
 
     bool required_odd_parity_for_T_path =
         accumulated_odd_complements_so_far ^ is_complement_T;
     __float128 cnt_paths_via_T;
-    if (required_odd_parity_for_T_path) { // 需要从 T_child_regular 出发的路径是奇数补数边
+    if (required_odd_parity_for_T_path) {
         cnt_paths_via_T = counts_from_T_child.odd_cnt;
-    } else { // 需要从 T_child_regular 出发的路径是偶数补数边
+    } else {
         cnt_paths_via_T = counts_from_T_child.even_cnt;
     }
 
     __float128 total_valid_continuing_paths = cnt_paths_via_E + cnt_paths_via_T;
-    int var_index =
-        Cudd_NodeReadIndex(current_node_regular); // 此节点的CUDD变量索引
+    int var_index = Cudd_NodeReadIndex(current_node_regular);
 
     // "卡住" 条件：从此节点无法继续找到满足目标奇偶性的路径。
-    if (total_valid_continuing_paths <=
-        0.0Q) { // 使用 <= 0.0Q 是为了浮点数比较的鲁棒性
-        // 在生产环境中可以移除或设为条件编译的日志，以减少不必要的输出
-        // cerr << "Warning: DFS stuck at CUDD var " << var_index
-        //      << " (node " << current_node_regular
-        //      << "). No valid continuing paths for target parity." << endl;
-        return false; // 表明此DFS分支失败。
+    if (total_valid_continuing_paths <= 0.0Q) {
+        return false;
     }
 
     // 根据概率选择分支
     __float128 prob_take_E_branch;
-    if (total_valid_continuing_paths >
-        0.0Q) { // 避免除零 (虽然“卡住”检查已处理，但仍是好习惯)
+    if (total_valid_continuing_paths > 0.0Q) {
         prob_take_E_branch = cnt_paths_via_E / total_valid_continuing_paths;
     } else {
-        // 此情况理论上不应到达，因为上面的 "卡住" 条件会先捕获。
-        // 如果意外到达，可以随机选择或报错。
-        prob_take_E_branch = 0.5Q; // 任意选择，但不应发生
+        prob_take_E_branch = 0.5Q;
     }
 
-    __float128 random_draw_val = dist(rng); // rng 是全局/静态的 mt19937 引擎
+    __float128 random_draw_val = dist(rng);
 
     if (random_draw_val < prob_take_E_branch) {
         // 选择 Else 分支 (当前变量赋值为 0)
