@@ -117,46 +117,28 @@ PathCounts compute_path_counts_recursive(DdNode *node_regular,
 // DFS function to generate a random solution
 // assignment_map: CUDD variable index -> 0 or 1
 bool generate_random_solution_dfs(
-    DdNode *current_node_regular,
-    bool
-        accumulated_odd_complements_so_far, // 从主BDD根（考虑其初始补码状态）到 current_node_regular 的父节点，
-    // 其路径上的有效补数边数量是否为奇数。
-    DdManager *manager,
-    std::map<int, int> &assignment_map, // 输出：CUDD变量索引 -> 0 或 1
-    std::uniform_real_distribution<__float128>
-        &dist // 随机数分布 (假设已解决nextafter问题)
-) {
+    DdNode *current_node_regular, bool accumulated_odd_complements_so_far,
+    DdManager *manager, std::map<int, int> &assignment_map,
+    std::uniform_real_distribution<__float128> &dist) {
     // 基本情况1：成功到达1-terminal。
-    // 到此的路径选择已确保满足整体偶数补数边的目标。
     if (current_node_regular == Cudd_ReadOne(manager)) {
-        // （可选）最终检查 accumulated_odd_complements_so_far 是否确实为 false。
-        // 如果之前的逻辑正确，它应该是 false。
-        // if (accumulated_odd_complements_so_far) {
-        //     cerr << "Warning: DFS reached 1-terminal, but accumulated_odd_complements_so_far is true." << endl;
-        // }
-        return true; // 成功找到通往1-terminal的路径段。
+        return true;
     }
 
     // 基本情况2：到达0-terminal。此路径无效，不能满足函数。
     if (current_node_regular == Cudd_ReadLogicZero(manager)) {
-        // 为避免过多输出，可以将此cerr设为调试模式下才打印
-        // cerr << "Debug: DFS reached 0-terminal. This path is invalid." << endl;
-        return false; // 路径无法导向一个解。
+        return false;
     }
 
     // 递归步骤：处理内部BDD节点
-    DdNode *E_child_ptr =
-        Cudd_E(current_node_regular); // Else子节点指针 (可能带补码)
-    DdNode *T_child_ptr =
-        Cudd_T(current_node_regular); // Then子节点指针 (可能带补码)
+    DdNode *E_child_ptr = Cudd_E(current_node_regular);
+    DdNode *T_child_ptr = Cudd_T(current_node_regular);
 
-    DdNode *E_child_regular = Cudd_Regular(E_child_ptr); // Else子节点的正则形式
-    DdNode *T_child_regular = Cudd_Regular(T_child_ptr); // Then子节点的正则形式
+    DdNode *E_child_regular = Cudd_Regular(E_child_ptr);
+    DdNode *T_child_regular = Cudd_Regular(T_child_ptr);
 
-    bool is_complement_E =
-        Cudd_IsComplement(E_child_ptr); // 到Else子节点的边是否是补数边?
-    bool is_complement_T =
-        Cudd_IsComplement(T_child_ptr); // 到Then子节点的边是否是补数边?
+    bool is_complement_E = Cudd_IsComplement(E_child_ptr);
+    bool is_complement_T = Cudd_IsComplement(T_child_ptr);
 
     // 获取从子节点（正则形式）到1-terminal的路径计数。
     // 这会调用主要的DP函数，该函数能处理終端節點和备忘录。
@@ -165,56 +147,41 @@ bool generate_random_solution_dfs(
     PathCounts counts_from_T_child =
         compute_path_counts_recursive(T_child_regular, manager);
 
-    // 确定从子节点的正则形式到1-terminal的路径所需的奇偶性，
-    // 以使得从BDD根节点经由此子节点到1-terminal的整个路径具有偶数条补数边。
-    // 目标: overall_parity = false (偶数).
-    //       overall_parity = accumulated_odd_complements_so_far ^ edge_complement ^ path_from_child_complement
-    // 因此: path_from_child_complement = accumulated_odd_complements_so_far ^ edge_complement
-
     bool required_odd_parity_for_E_path =
         accumulated_odd_complements_so_far ^ is_complement_E;
     __float128 cnt_paths_via_E;
-    if (required_odd_parity_for_E_path) { // 需要从 E_child_regular 出发的路径是奇数补数边
+    if (required_odd_parity_for_E_path) {
         cnt_paths_via_E = counts_from_E_child.odd_cnt;
-    } else { // 需要从 E_child_regular 出发的路径是偶数补数边
+    } else {
         cnt_paths_via_E = counts_from_E_child.even_cnt;
     }
 
     bool required_odd_parity_for_T_path =
         accumulated_odd_complements_so_far ^ is_complement_T;
     __float128 cnt_paths_via_T;
-    if (required_odd_parity_for_T_path) { // 需要从 T_child_regular 出发的路径是奇数补数边
+    if (required_odd_parity_for_T_path) {
         cnt_paths_via_T = counts_from_T_child.odd_cnt;
-    } else { // 需要从 T_child_regular 出发的路径是偶数补数边
+    } else {
         cnt_paths_via_T = counts_from_T_child.even_cnt;
     }
 
     __float128 total_valid_continuing_paths = cnt_paths_via_E + cnt_paths_via_T;
-    int var_index =
-        Cudd_NodeReadIndex(current_node_regular); // 此节点的CUDD变量索引
+    int var_index = Cudd_NodeReadIndex(current_node_regular);
 
     // "卡住" 条件：从此节点无法继续找到满足目标奇偶性的路径。
-    if (total_valid_continuing_paths <=
-        0.0Q) { // 使用 <= 0.0Q 是为了浮点数比较的鲁棒性
-        // 在生产环境中可以移除或设为条件编译的日志，以减少不必要的输出
-        // cerr << "Warning: DFS stuck at CUDD var " << var_index
-        //      << " (node " << current_node_regular
-        //      << "). No valid continuing paths for target parity." << endl;
-        return false; // 表明此DFS分支失败。
+    if (total_valid_continuing_paths <= 0.0Q) {
+        return false;
     }
 
     // 根据概率选择分支
     __float128 prob_take_E_branch;
-    if (total_valid_continuing_paths >
-        0.0Q) { // 避免除零 (虽然“卡住”检查已处理，但仍是好习惯)
+    if (total_valid_continuing_paths > 0.0Q) {
         prob_take_E_branch = cnt_paths_via_E / total_valid_continuing_paths;
     } else {
-        // 此情况理论上不应到达，因为上面的 "卡住" 条件会先捕获。
-        // 如果意外到达，可以随机选择或报错。
-        prob_take_E_branch = 0.5Q; // 任意选择，但不应发生
+        prob_take_E_branch = 0.5Q;
     }
 
-    __float128 random_draw_val = dist(rng); // rng 是全局/静态的 mt19937 引擎
+    __float128 random_draw_val = dist(rng);
 
     if (random_draw_val < prob_take_E_branch) {
         // 选择 Else 分支 (当前变量赋值为 0)
@@ -609,12 +576,9 @@ int aig_to_bdd_solver(const string &aig_file_path,
     __float128 total_target_paths;
     bool initial_accumulated_odd_complements =
         Cudd_IsComplement(bdd_circuit_output);
-    if (initial_accumulated_odd_complements) { // circuit is NOT(regular_root_bdd), want regular_root_bdd to be FALSE
-        // to make NOT(regular_root_bdd) TRUE.
-        // Path from regular_root_bdd to 1-terminal must have ODD complements for overall EVEN.
+    if (initial_accumulated_odd_complements) {
         total_target_paths = root_counts.odd_cnt;
-    } else { // circuit is regular_root_bdd, want regular_root_bdd to be TRUE.
-        // Path from regular_root_bdd to 1-terminal must have EVEN complements for overall EVEN.
+    } else {
         total_target_paths = root_counts.even_cnt;
     }
 
@@ -634,17 +598,12 @@ int aig_to_bdd_solver(const string &aig_file_path,
         cout << "Debug: Starting to pick " << num_samples
              << " samples using new DFS method." << endl;
 
-        // 在这里声明和初始化 dist_float128
-        // 确保您之前为 __float128 添加的 std::nextafter 重载有效
+        // 声明和初始化 dist_float128
         std::uniform_real_distribution<__float128> dist_float128(0.0Q, 1.0Q);
 
-        int samples_successfully_generated =
-            0; // 计数器：成功生成的唯一样本数量
+        int samples_successfully_generated = 0;
         int total_dfs_attempts = 0;
-        const int MAX_TOTAL_DFS_ATTEMPTS =
-            num_samples *
-            200; // 增加每次采样尝试的系数，因为找唯一的解可能更难，例如 num_samples * 100 或更高
-        // 如果唯一解的数量远小于 num_samples，这个值可能需要调整得更大或有其他策略
+        const int MAX_TOTAL_DFS_ATTEMPTS = num_samples * 200;
 
         // 新增：用于存储已生成的唯一解的签名，以避免重复
         std::set<std::string> unique_assignment_signatures;
@@ -660,8 +619,7 @@ int aig_to_bdd_solver(const string &aig_file_path,
             if (nI == 0) {
                 if (bdd_circuit_output == Cudd_ReadOne(manager) &&
                     !initial_accumulated_odd_complements) {
-                    current_sample_generation_successful =
-                        true; // 空赋值是唯一解
+                    current_sample_generation_successful = true;
                 } else {
                     cout << "LOG: Cannot generate sample for nI=0 case "
                             "(unexpected, or target path count was non-zero "
@@ -671,20 +629,16 @@ int aig_to_bdd_solver(const string &aig_file_path,
                 }
             }
             // 特殊情况处理: nI > 0 但BDD根是常数
-            else if (regular_root_bdd == Cudd_ReadOne(manager)) { // 函数是常数1
-                if (!initial_accumulated_odd_complements) { // 奇偶性要求也满足
-                    current_sample_generation_successful =
-                        true; // "任何赋值"都行，空CUDD map即可
+            else if (regular_root_bdd == Cudd_ReadOne(manager)) {
+                if (!initial_accumulated_odd_complements) {
+                    current_sample_generation_successful = true;
                 } else {
                     cout << "LOG: Function is constant 1, but parity "
                             "requirement not met. Stopping sampling."
                          << endl;
                     break;
                 }
-            } else if (
-                regular_root_bdd ==
-                Cudd_ReadLogicZero(
-                    manager)) { // 函数是常数0 (理论上 total_target_paths > 0 不会到这里)
+            } else if (regular_root_bdd == Cudd_ReadLogicZero(manager)) {
                 cout << "LOG: Function is constant 0. No solutions. Stopping "
                         "sampling (should have been caught by "
                         "total_target_paths <= 0)."
@@ -706,7 +660,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
                 // --- 开始JSON格式化一个成功生成的样本 ---
                 json assignment_entry = json::array();
                 int current_bit_idx_overall = 0;
-                // bool fatal_json_formatting_error = false; // 这个变量未使用，可以移除
 
                 for (const auto &var_info : original_variable_list) {
                     int bit_width = var_info.value("bit_width", 1);
@@ -718,7 +671,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
                                     "inconsistent with AIG nI ("
                                  << current_bit_idx_overall << " >= " << nI
                                  << "). Cannot proceed." << endl;
-                            // ... (已有的致命错误处理逻辑，清理并返回1) ...
                             if (bdd_circuit_output)
                                 Cudd_RecursiveDeref(manager,
                                                     bdd_circuit_output);
@@ -778,9 +730,6 @@ int aig_to_bdd_solver(const string &aig_file_path,
                 }
                 // --- 唯一性检查结束 ---
             }
-            // 如果 current_sample_generation_successful 为 false (DFS失败)，
-            // total_dfs_attempts 已经增加，循环将继续，
-            // samples_successfully_generated 不会增加。
         } // end while loop for sampling
     } // end if (total_target_paths > 0.0Q)
     // --- END NEW SAMPLING LOGIC ---
