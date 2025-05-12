@@ -223,25 +223,9 @@ int json_v_converter(const string &input_json_path,
                           info.verilog_expression_body + ");");
     }
 
-    // Generate result assignment
-    string result_assign = "    assign result = ";
-    if (all_constraints_info.empty()) {
-        result_assign += "1'b1;"; // No constraints, result is true
-    } else {
-        for (size_t i = 0; i < all_constraints_info.size(); ++i) {
-            result_assign += all_constraints_info[i].assigned_wire_name;
-            if (i == all_constraints_info.size() - 1) {
-                result_assign += ";";
-            } else {
-                result_assign += " & ";
-            }
-        }
-    }
-    v_lines.push_back(result_assign);
-    v_lines.push_back("endmodule");
-
-    // --- Component Identification ---
-    json components_json_output_data = json::object();
+    // --- Component Identification DSU Logic (used for ordering 'result' and for _components.json) ---
+    std::map<int, std::vector<int>>
+        dsu_root_to_internal_indices_map; // Populated regardless of all_constraints_info.empty() for consistency
     if (!all_constraints_info.empty()) {
         int num_effective_constraints = all_constraints_info.size();
         std::vector<int> dsu_parent(num_effective_constraints);
@@ -277,14 +261,92 @@ int json_v_converter(const string &input_json_path,
                 }
             }
         }
-
-        std::map<int, std::vector<int>> dsu_root_to_internal_indices_map;
+        // Populate dsu_root_to_internal_indices_map after DSU operations
         for (int i = 0; i < num_effective_constraints; ++i) {
             dsu_root_to_internal_indices_map[find_set(i)].push_back(i);
         }
+    }
+
+    // --- MODIFICATION START: Generate result assignment based on DSU component order ---
+    string result_assign = "    assign result = ";
+    if (all_constraints_info.empty()) {
+        result_assign += "1'b1;"; // No constraints, result is true
+    } else {
+        std::vector<std::string> ordered_result_wire_names;
+        std::set<int> processed_indices; // To track indices already added
+
+        // Iterate through DSU components. The order of components will depend on map iteration.
+        // For a more deterministic component order, one could collect map keys (roots), sort them, then iterate.
+        // However, for grouping, map iteration order is usually sufficient.
+        for (const auto &pair_root_indices : dsu_root_to_internal_indices_map) {
+            // pair_root_indices.second is std::vector<int> of internal indices for this component
+            for (int internal_idx : pair_root_indices.second) {
+                if (internal_idx >= 0 && static_cast<size_t>(internal_idx) <
+                                             all_constraints_info.size()) {
+                    if (processed_indices.find(internal_idx) ==
+                        processed_indices
+                            .end()) { // Ensure each wire is added once
+                        ordered_result_wire_names.push_back(
+                            all_constraints_info[internal_idx]
+                                .assigned_wire_name);
+                        processed_indices.insert(internal_idx);
+                    }
+                } else {
+                    cerr << "Warning: DSU component provided an out-of-bounds "
+                            "internal_idx: "
+                         << internal_idx << " while ordering result wires."
+                         << endl;
+                }
+            }
+        }
+
+        // Safety check: if DSU somehow didn't cover all constraints (highly unlikely if DSU logic is correct
+        // and all_constraints_info maps 0..N-1 to DSU elements), add any remaining ones.
+        // This also ensures that if dsu_root_to_internal_indices_map was empty (e.g. no constraints),
+        // this loop won't add anything, which is fine.
+        if (ordered_result_wire_names.size() != all_constraints_info.size() &&
+            !all_constraints_info.empty()) {
+            cerr << "Warning: Number of DSU-ordered wires ("
+                 << ordered_result_wire_names.size()
+                 << ") does not match total constraints ("
+                 << all_constraints_info.size()
+                 << "). Appending missing wires to result." << endl;
+            for (size_t i = 0; i < all_constraints_info.size(); ++i) {
+                if (processed_indices.find(static_cast<int>(i)) ==
+                    processed_indices.end()) {
+                    ordered_result_wire_names.push_back(
+                        all_constraints_info[i].assigned_wire_name);
+                    // No need to add to processed_indices here as we are just appending at the end.
+                }
+            }
+        }
+
+        if (!ordered_result_wire_names.empty()) {
+            for (size_t i = 0; i < ordered_result_wire_names.size(); ++i) {
+                result_assign += ordered_result_wire_names[i];
+                if (i == ordered_result_wire_names.size() - 1) {
+                    result_assign += ";";
+                } else {
+                    result_assign += " & ";
+                }
+            }
+        } else { // Should only happen if all_constraints_info was also empty
+            result_assign += "1'b1;";
+        }
+    }
+    v_lines.push_back(result_assign);
+    // --- MODIFICATION END ---
+    v_lines.push_back("endmodule");
+
+    // --- Component Identification for _components.json (existing logic) ---
+    json components_json_output_data = json::object();
+    if (!all_constraints_info.empty()) {
+        // DSU related maps (var_to_constraint_indices_map, dsu_root_to_internal_indices_map)
+        // are already populated from the DSU logic block above.
 
         json components_array = json::array();
         int comp_id_counter = 0;
+        // Iterate dsu_root_to_internal_indices_map again to create the JSON "components" part
         for (const auto &pair_root_indices : dsu_root_to_internal_indices_map) {
             json component_entry = json::object();
             component_entry["component_id"] = comp_id_counter++;
@@ -295,12 +357,21 @@ int json_v_converter(const string &input_json_path,
             std::set<int> component_total_vars;
 
             for (int internal_idx : pair_root_indices.second) {
-                constraint_wire_names_array.push_back(
-                    all_constraints_info[internal_idx].assigned_wire_name);
-                constraint_internal_indices_array.push_back(internal_idx);
-                component_total_vars.insert(
-                    all_constraints_info[internal_idx].variable_ids.begin(),
-                    all_constraints_info[internal_idx].variable_ids.end());
+                if (internal_idx >= 0 &&
+                    static_cast<size_t>(internal_idx) <
+                        all_constraints_info.size()) { // Bounds check
+                    constraint_wire_names_array.push_back(
+                        all_constraints_info[internal_idx].assigned_wire_name);
+                    constraint_internal_indices_array.push_back(internal_idx);
+                    component_total_vars.insert(
+                        all_constraints_info[internal_idx].variable_ids.begin(),
+                        all_constraints_info[internal_idx].variable_ids.end());
+                } else {
+                    cerr << "Warning: DSU component provided an out-of-bounds "
+                            "internal_idx: "
+                         << internal_idx
+                         << " while generating _components.json." << endl;
+                }
             }
             component_entry["constraint_wires"] = constraint_wire_names_array;
             component_entry["constraint_internal_indices"] =
@@ -315,6 +386,23 @@ int json_v_converter(const string &input_json_path,
         components_json_output_data["components"] =
             json::array(); // Empty components array
     }
+
+    // Add the list of wire names that are ANDed together to form the 'result' (as discussed previously for future use)
+    json result_operand_wires_json_array = json::array();
+    if (!all_constraints_info.empty()) {
+        // Use the DSU-ordered wire names if available and complete, otherwise the original order
+        // For consistency with the 'assign result' line, we can reuse ordered_result_wire_names if it was successfully generated
+        // However, simpler to just iterate all_constraints_info for this specific field as it's for informational purposes
+        // for a later script. The Verilog 'assign result' line already reflects the DSU-based order.
+        // For this "result_operand_wire_names" field, the order is less critical than its completeness.
+        // Let's use the original order of all_constraints_info to ensure all wires are listed.
+        for (const auto &constraint_info_entry : all_constraints_info) {
+            result_operand_wires_json_array.push_back(
+                constraint_info_entry.assigned_wire_name);
+        }
+    }
+    components_json_output_data["result_operand_wire_names"] =
+        result_operand_wires_json_array;
 
     // --- File Naming and Writing ---
     filesystem::path input_json_path_obj(input_json_path);
