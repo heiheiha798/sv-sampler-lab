@@ -958,39 +958,32 @@ static void get_pi_support_for_node_dfs_recursive(
         node_pi_support.insert(support1.begin(), support1.end());
         node_pi_support.insert(support2.begin(), support2.end());
     }
-    // Note: The actual memoization of 'regular_literal's full support happens in the caller 'get_pi_support'
 }
 
-// 主变量排序函数 (修改版：从所有主输出开始DFS)
+// version 1
 static std::vector<int> determine_bdd_variable_order(
     int nI_total_from_header,
     const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    std::cout << "Debug: Determining BDD variable order (DFS with PI support "
-                 "heuristic, starting from all POs)..."
+    std::cout << "Debug: Determining BDD variable order (V1: Simple DFS from "
+                 "all POs, AND children fixed order 1-2)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
     std::set<int> added_pis_to_final_order_set;
-
     std::set<int> all_pi_literals_set;
     for (int pi_lit : aig_primary_input_literals) {
         all_pi_literals_set.insert((pi_lit / 2) * 2);
     }
-
-    std::map<int, std::set<int>> memoized_pi_supports;
     std::set<int> visited_nodes_for_ordering_dfs;
 
     std::function<void(int)> order_dfs_main = [&](int current_node_literal) {
         int regular_node_lit = (current_node_literal / 2) * 2;
-
         if (regular_node_lit == 0 || regular_node_lit == 1)
             return;
-
-        if (visited_nodes_for_ordering_dfs.count(regular_node_lit)) {
+        if (visited_nodes_for_ordering_dfs.count(regular_node_lit))
             return;
-        }
         visited_nodes_for_ordering_dfs.insert(regular_node_lit);
 
         if (all_pi_literals_set.count(regular_node_lit)) {
@@ -1001,99 +994,35 @@ static std::vector<int> determine_bdd_variable_order(
             }
             return;
         }
-
         auto it_and = and_gate_definitions.find(regular_node_lit);
         if (it_and != and_gate_definitions.end()) {
             const auto &inputs = it_and->second;
-
-            std::set<int> support1 =
-                get_pi_support(inputs.first, and_gate_definitions,
-                               all_pi_literals_set, memoized_pi_supports);
-            std::set<int> support2 =
-                get_pi_support(inputs.second, and_gate_definitions,
-                               all_pi_literals_set, memoized_pi_supports);
-
-            if (support1.size() <= support2.size()) {
-                order_dfs_main(inputs.first);
-                order_dfs_main(inputs.second);
-            } else {
-                order_dfs_main(inputs.second);
-                order_dfs_main(inputs.first);
-            }
+            order_dfs_main(inputs.first);  // 固定顺序：先处理第一个输入
+            order_dfs_main(inputs.second); // 再处理第二个输入
         }
     };
 
-    // --- MODIFICATION START: Iterate over all primary outputs ---
     if (!circuit_output_literals_from_aig.empty()) {
-        std::cout << "Debug: Starting variable ordering DFS from "
-                  << circuit_output_literals_from_aig.size() << " PO(s)."
-                  << std::endl;
         for (int po_lit : circuit_output_literals_from_aig) {
-            if (po_lit == 0 ||
-                po_lit == 1) { // Skip constant outputs as DFS start points
-                std::cout << "Debug: Skipping constant PO Literal: " << po_lit
-                          << " for DFS start." << std::endl;
+            if (po_lit == 0 || po_lit == 1)
                 continue;
-            }
-            std::cout << "Debug: Initiating DFS from PO Literal: " << po_lit
-                      << std::endl;
-            order_dfs_main(
-                po_lit); // order_dfs_main handles its own visited set
+            order_dfs_main(po_lit);
         }
     } else {
-        std::cout << "Warning: No primary outputs found in AIG to start "
-                     "variable ordering strategy."
+        std::cout << "Warning: No primary outputs for DFS start in V1."
                   << std::endl;
     }
-    // --- MODIFICATION END ---
-
     for (int pi_lit_from_file : aig_primary_input_literals) {
         int regular_pi_lit = (pi_lit_from_file / 2) * 2;
-        if (all_pi_literals_set.count(regular_pi_lit)) {
-            if (added_pis_to_final_order_set.find(regular_pi_lit) ==
+        if (all_pi_literals_set.count(regular_pi_lit) &&
+            added_pis_to_final_order_set.find(regular_pi_lit) ==
                 added_pis_to_final_order_set.end()) {
-                ordered_pis_for_bdd_creation.push_back(regular_pi_lit);
-                added_pis_to_final_order_set.insert(regular_pi_lit);
-                std::cout << "Debug: Adding unvisited PI to order (fallback): "
-                          << regular_pi_lit << std::endl;
-            }
+            ordered_pis_for_bdd_creation.push_back(regular_pi_lit);
+            added_pis_to_final_order_set.insert(regular_pi_lit);
         }
     }
-
-    if (ordered_pis_for_bdd_creation.size() != all_pi_literals_set.size() &&
-        !aig_primary_input_literals.empty()) {
-        std::cout << "Warning: Final ordered PI count ("
-                  << ordered_pis_for_bdd_creation.size()
-                  << ") does not match unique PI count from AIG PI list ("
-                  << all_pi_literals_set.size() << ")." << std::endl;
-    }
-    if (all_pi_literals_set.size() !=
-            static_cast<size_t>(nI_total_from_header) &&
-        !aig_primary_input_literals.empty()) {
-        std::cout << "Warning: Count of unique PIs from AIG file's PI list ("
-                  << all_pi_literals_set.size()
-                  << ") does not match nI from AIG header ("
-                  << nI_total_from_header << ")." << std::endl;
-    }
-
-    std::cout
-        << "Debug: BDD variable order determined. Total variables in order: "
-        << ordered_pis_for_bdd_creation.size() << ". Order: ";
-    size_t print_limit = 20;
-    for (size_t i = 0; i < ordered_pis_for_bdd_creation.size(); ++i) {
-        if (ordered_pis_for_bdd_creation.size() <= print_limit * 2 ||
-            i < print_limit ||
-            i >= ordered_pis_for_bdd_creation.size() - print_limit) {
-            std::cout << ordered_pis_for_bdd_creation[i]
-                      << (i == ordered_pis_for_bdd_creation.size() - 1 ? ""
-                                                                       : ", ");
-        } else if (i == print_limit) {
-            std::cout << "... ("
-                      << (ordered_pis_for_bdd_creation.size() - 2 * print_limit)
-                      << " more PIs) ..., ";
-        }
-    }
-    std::cout << std::endl;
-
+    // (日志打印部分可以复用您已有的，此处省略以保持简洁)
+    std::cout << "Debug (V1): Final ordered PIs count: "
+              << ordered_pis_for_bdd_creation.size() << std::endl;
     return ordered_pis_for_bdd_creation;
 }
