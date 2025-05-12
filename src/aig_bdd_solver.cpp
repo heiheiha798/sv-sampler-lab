@@ -1015,7 +1015,7 @@ static std::vector<int> determine_bdd_variable_order(
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
     std::cout << "Debug: Determining BDD variable order (POs Strategy: Large "
-                 "In Middle by PI Support, DFS: Simple Fixed 1-2)..."
+                 "At Ends by PI Support, DFS: Simple Fixed 1-2)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
@@ -1032,29 +1032,31 @@ static std::vector<int> determine_bdd_variable_order(
     if (!circuit_output_literals_from_aig.empty()) {
         for (int po_lit : circuit_output_literals_from_aig) {
             if (po_lit == 0 || po_lit == 1)
-                continue; // Skip constant POs
+                continue;
             std::set<int> support = get_pi_support(
                 po_lit, and_gate_definitions, all_pi_literals_set,
                 memoized_pi_supports_for_po_sorting);
             po_info_list.push_back({support.size(), po_lit});
         }
-        // Sort POs by PI support size, ascending (smallest support first)
-        std::sort(po_info_list.begin(), po_info_list.end());
+        std::sort(po_info_list.begin(),
+                  po_info_list.end()); // Sorts by support_size ascending
     }
 
     std::vector<int> final_po_processing_order;
     if (!po_info_list.empty()) {
         size_t n_pos = po_info_list.size();
         if (n_pos <= 2) {
+            // For 0, 1 PO, order doesn't matter. For 2 POs [S, L], process L then S for LAE.
             for (const auto &p_info : po_info_list)
                 final_po_processing_order.push_back(p_info.second);
+            if (n_pos == 2)
+                std::reverse(final_po_processing_order.begin(),
+                             final_po_processing_order.end());
         } else {
-            // Strategy: Smallest 1/3, then Largest 1/3, then Medium 1/3
+            // Strategy: Largest 1/3, then Smallest 1/3, then Medium 1/3
             size_t count_s = n_pos / 3;
             size_t count_l = n_pos / 3;
             size_t count_m = n_pos - count_s - count_l;
-
-            // Adjust counts if N%3 is not 0 to distribute remainder, e.g., to medium or largest
             if (n_pos % 3 == 1) {
                 count_m++;
             } else if (n_pos % 3 == 2) {
@@ -1069,19 +1071,18 @@ static std::vector<int> determine_bdd_variable_order(
             // Largest group is from the end of the sorted list
             for (size_t i = 0; i < count_l; ++i)
                 group_large.push_back(po_info_list[n_pos - 1 - i].second);
-            std::reverse(
-                group_large.begin(),
-                group_large.end()); // So largest of the large comes first
+            std::reverse(group_large.begin(),
+                         group_large.end()); // Largest of the large first
 
             for (size_t i = 0; i < count_m; ++i)
                 group_medium.push_back(po_info_list[count_s + i].second);
 
             final_po_processing_order.insert(final_po_processing_order.end(),
-                                             group_small.begin(),
-                                             group_small.end());
-            final_po_processing_order.insert(final_po_processing_order.end(),
                                              group_large.begin(),
                                              group_large.end());
+            final_po_processing_order.insert(final_po_processing_order.end(),
+                                             group_small.begin(),
+                                             group_small.end());
             final_po_processing_order.insert(final_po_processing_order.end(),
                                              group_medium.begin(),
                                              group_medium.end());
@@ -1090,7 +1091,7 @@ static std::vector<int> determine_bdd_variable_order(
                 final_po_processing_order.clear();
                 for (const auto &p : po_info_list)
                     final_po_processing_order.push_back(p.second);
-                cerr << "Warning (LIM): PO partitioning resulted in mismatched "
+                cerr << "Warning (LAE): PO partitioning resulted in mismatched "
                         "count. Falling back to simple ascending support order."
                      << endl;
             }
@@ -1120,7 +1121,7 @@ static std::vector<int> determine_bdd_variable_order(
     }
 
     // (Log and validation, same as previous versions)
-    std::cout << "Debug (LIM): Final ordered PIs count: "
+    std::cout << "Debug (LAE): Final ordered PIs count: "
               << ordered_pis_for_bdd_creation.size() << std::endl;
     // (Full logging of ordered_pis_for_bdd_creation can be added here if needed)
     return ordered_pis_for_bdd_creation;
