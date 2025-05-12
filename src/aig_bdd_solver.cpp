@@ -966,8 +966,8 @@ static std::vector<int> determine_bdd_variable_order(
     const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    std::cout << "Debug: Determining BDD variable order (V1: Simple DFS from "
-                 "all POs, AND children fixed order 1-2)..."
+    std::cout << "Debug: Determining BDD variable order (V2: Simple DFS from "
+                 "all POs, AND children fixed order 2-1)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
@@ -997,11 +997,12 @@ static std::vector<int> determine_bdd_variable_order(
         auto it_and = and_gate_definitions.find(regular_node_lit);
         if (it_and != and_gate_definitions.end()) {
             const auto &inputs = it_and->second;
-            order_dfs_main(inputs.first);  // 固定顺序：先处理第一个输入
-            order_dfs_main(inputs.second); // 再处理第二个输入
+            order_dfs_main(inputs.second); // 固定顺序：先处理第二个输入
+            order_dfs_main(inputs.first);  // 再处理第一个输入
         }
     };
 
+    // (DFS启动和补充PI的逻辑与V1相同)
     if (!circuit_output_literals_from_aig.empty()) {
         for (int po_lit : circuit_output_literals_from_aig) {
             if (po_lit == 0 || po_lit == 1)
@@ -1009,7 +1010,7 @@ static std::vector<int> determine_bdd_variable_order(
             order_dfs_main(po_lit);
         }
     } else {
-        std::cout << "Warning: No primary outputs for DFS start in V1."
+        std::cout << "Warning: No primary outputs for DFS start in V2."
                   << std::endl;
     }
     for (int pi_lit_from_file : aig_primary_input_literals) {
@@ -1021,8 +1022,7 @@ static std::vector<int> determine_bdd_variable_order(
             added_pis_to_final_order_set.insert(regular_pi_lit);
         }
     }
-    // (日志打印部分可以复用您已有的，此处省略以保持简洁)
-    std::cout << "Debug (V1): Final ordered PIs count: "
+    std::cout << "Debug (V2): Final ordered PIs count: "
               << ordered_pis_for_bdd_creation.size() << std::endl;
     return ordered_pis_for_bdd_creation;
 }
