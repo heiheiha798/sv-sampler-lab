@@ -966,8 +966,8 @@ static std::vector<int> determine_bdd_variable_order(
     const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    std::cout << "Debug: Determining BDD variable order (V2: Simple DFS from "
-                 "all POs, AND children fixed order 2-1)..."
+    std::cout << "Debug: Determining BDD variable order (V3: DFS with PI "
+                 "support heuristic, smaller first)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
@@ -976,6 +976,7 @@ static std::vector<int> determine_bdd_variable_order(
     for (int pi_lit : aig_primary_input_literals) {
         all_pi_literals_set.insert((pi_lit / 2) * 2);
     }
+    std::map<int, std::set<int>> memoized_pi_supports;
     std::set<int> visited_nodes_for_ordering_dfs;
 
     std::function<void(int)> order_dfs_main = [&](int current_node_literal) {
@@ -997,11 +998,21 @@ static std::vector<int> determine_bdd_variable_order(
         auto it_and = and_gate_definitions.find(regular_node_lit);
         if (it_and != and_gate_definitions.end()) {
             const auto &inputs = it_and->second;
-            order_dfs_main(inputs.second); // 固定顺序：先处理第二个输入
-            order_dfs_main(inputs.first);  // 再处理第一个输入
+            std::set<int> support1 =
+                get_pi_support(inputs.first, and_gate_definitions,
+                               all_pi_literals_set, memoized_pi_supports);
+            std::set<int> support2 =
+                get_pi_support(inputs.second, and_gate_definitions,
+                               all_pi_literals_set, memoized_pi_supports);
+            if (support1.size() <= support2.size()) {
+                order_dfs_main(inputs.first);
+                order_dfs_main(inputs.second);
+            } else {
+                order_dfs_main(inputs.second);
+                order_dfs_main(inputs.first);
+            }
         }
     };
-
     // (DFS启动和补充PI的逻辑与V1相同)
     if (!circuit_output_literals_from_aig.empty()) {
         for (int po_lit : circuit_output_literals_from_aig) {
@@ -1010,7 +1021,7 @@ static std::vector<int> determine_bdd_variable_order(
             order_dfs_main(po_lit);
         }
     } else {
-        std::cout << "Warning: No primary outputs for DFS start in V2."
+        std::cout << "Warning: No primary outputs for DFS start in V3."
                   << std::endl;
     }
     for (int pi_lit_from_file : aig_primary_input_literals) {
@@ -1022,7 +1033,7 @@ static std::vector<int> determine_bdd_variable_order(
             added_pis_to_final_order_set.insert(regular_pi_lit);
         }
     }
-    std::cout << "Debug (V2): Final ordered PIs count: "
+    std::cout << "Debug (V3): Final ordered PIs count: "
               << ordered_pis_for_bdd_creation.size() << std::endl;
     return ordered_pis_for_bdd_creation;
 }
