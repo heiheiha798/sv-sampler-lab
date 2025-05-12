@@ -1,62 +1,91 @@
 #include "nlohmann/json.hpp"
-#include "solver_functions.h"
+#include "solver_functions.h" // For function declarations if any other utilities were there (not strictly needed for this file's content)
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
+#include <map>
+#include <numeric>   // For std::iota
+#include <algorithm> // For std::sort, std::unique
 
 using json = nlohmann::json;
 using namespace std;
 using namespace std::filesystem;
 
-// 本文件实现功能：将input_json_path的json格式文件输入
-// 转化成verilog代码，输出.v文件到output_v_dir，以便后续yosys处理
+// Structure to hold details about a parsed expression
+struct ExpressionDetail {
+    string verilog_expr_str;
+    std::set<int> variable_ids;
+    // Unlike the previous plan, we will populate a global map of divisors
+    // directly within get_expression_details to simplify unique collection.
+};
 
-// 用于递归提取json中的约束
-vector<string> special_cnstrs; // 储存分母不能为零导致的约束的表达式
-string expression_tree(const json &node) {
+// Structure to hold internal information about each constraint (original or special)
+struct ConstraintInternalInfo {
+    string verilog_expression_body; // The part that goes inside |(...)
+    std::set<int> variable_ids;
+    string assigned_wire_name;
+    int original_json_constraint_index; // -1 for special constraints, or index in constraint_list
+};
+
+// Forward declaration
+static ExpressionDetail get_expression_details(
+    const json &node,
+    std::map<std::string, ExpressionDetail> &all_divisors_map);
+
+// Recursive function to parse JSON expression tree and collect details
+static ExpressionDetail get_expression_details(
+    const json &node,
+    std::map<std::string, ExpressionDetail> &all_divisors_map) {
+    ExpressionDetail current_detail;
     string type = node["op"];
 
-    // 变量或定值
     if (type == "VAR") {
         int id = node.value("id", 0);
-        return string("var_" + to_string(id));
+        current_detail.verilog_expr_str = "var_" + to_string(id);
+        current_detail.variable_ids.insert(id);
     } else if (type == "CONST") {
-        return node.value("value", "1'b0");
-    }
+        current_detail.verilog_expr_str = node.value("value", "1'b0");
+    } else if (type == "BIT_NEG" || type == "LOG_NEG" || type == "MINUS") {
+        ExpressionDetail lhs_detail =
+            get_expression_details(node["lhs_expression"], all_divisors_map);
+        current_detail.variable_ids = lhs_detail.variable_ids;
 
-    // 一元运算
-    // 根据 op_detector 结果，保留: BIT_NEG, LOG_NEG, MINUS (作为一元负号)
-    // 移除了 RED_AND, RED_OR, RED_XOR, RED_NAND, RED_NOR, RED_XNOR, UNARY_PLUS
-    else if (type == "BIT_NEG" || type == "LOG_NEG" || type == "MINUS") {
-        string lhs = expression_tree(node["lhs_expression"]);
         string op_symbol;
         if (type == "BIT_NEG")
             op_symbol = "~";
         else if (type == "LOG_NEG")
             op_symbol = "!";
-        else if (type == "MINUS") // 假设 MINUS 是您列表中的一元负号
+        else if (type == "MINUS")
             op_symbol = "-";
-        return op_symbol + "(" + lhs + ")";
-    }
+        current_detail.verilog_expr_str =
+            op_symbol + "(" + lhs_detail.verilog_expr_str + ")";
+    } else { // Binary operators
+        ExpressionDetail lhs_detail =
+            get_expression_details(node["lhs_expression"], all_divisors_map);
+        ExpressionDetail rhs_detail =
+            get_expression_details(node["rhs_expression"], all_divisors_map);
 
-    // 二元运算符
-    else if (type == "ADD" || type == "SUB" || type == "MUL" || type == "DIV" ||
-             type == "MOD" || type == "LSHIFT" || type == "RSHIFT" ||
-             type == "BIT_AND" || type == "BIT_OR" || type == "BIT_XOR" ||
-             type == "LOG_AND" || type == "LOG_OR" || type == "EQ" ||
-             type == "NEQ" || type == "IMPLY") {
-        string lhs = expression_tree(node["lhs_expression"]);
-        string rhs = expression_tree(node["rhs_expression"]);
+        current_detail.variable_ids = lhs_detail.variable_ids;
+        current_detail.variable_ids.insert(rhs_detail.variable_ids.begin(),
+                                           rhs_detail.variable_ids.end());
 
-        // 特殊关照 DIV 和 MOD 的分母
-        if (type == "DIV" || type == "MOD")
-            special_cnstrs.push_back(rhs);
+        if (type == "DIV" || type == "MOD") {
+            // Store the divisor detail in the global map if not already present based on its Verilog string
+            // This ensures unique divisors are collected across the entire JSON.
+            if (all_divisors_map.find(rhs_detail.verilog_expr_str) ==
+                all_divisors_map.end()) {
+                all_divisors_map[rhs_detail.verilog_expr_str] = rhs_detail;
+            }
+        }
 
-        if (type == "IMPLY")
-            return "( (!(" + lhs + ")) || (" + rhs + ") )";
-        else {
+        if (type == "IMPLY") {
+            current_detail.verilog_expr_str =
+                "( (!(" + lhs_detail.verilog_expr_str + ")) || (" +
+                rhs_detail.verilog_expr_str + ") )";
+        } else {
             string op_symbol;
             if (type == "ADD")
                 op_symbol = "+";
@@ -86,27 +115,25 @@ string expression_tree(const json &node) {
                 op_symbol = "==";
             else if (type == "NEQ")
                 op_symbol = "!=";
-            return "(" + lhs + " " + op_symbol + " " + rhs + ")";
+            else {
+                cerr << "Warning: Unhandled or unknown binary 'op' type "
+                        "encountered in get_expression_details: "
+                     << type << endl;
+                current_detail.verilog_expr_str =
+                    "/* UNHANDLED_BINARY_OP: " + type + " */";
+                return current_detail; // Early exit for unhandled binary op
+            }
+            current_detail.verilog_expr_str =
+                "(" + lhs_detail.verilog_expr_str + " " + op_symbol + " " +
+                rhs_detail.verilog_expr_str + ")";
         }
     }
-    // 如果 op 类型不在上述任何一个分支中，给出一个警告或错误处理
-    else {
-        cerr << "Warning: Unhandled or unknown 'op' type encountered in "
-                "expression_tree: "
-             << type << endl;
-        return "/* UNHANDLED_OP: " + type + " */"; // 返回一个表示错误的字符串
-    }
-
-    return "/* ERROR_IN_EXPRESSION_TREE_LOGIC */";
+    return current_detail;
 }
 
-// 核心模块：JSON 到 Verilog 转换
+// Core module: JSON 到 Verilog 转换 and Component Info Generation
 int json_v_converter(const string &input_json_path,
                      const string &output_v_dir) {
-    // 清空 special_cnstrs，确保每次调用都是新的状态
-    special_cnstrs.clear();
-
-    // 读取输入至data
     json data;
     ifstream input_json_stream(input_json_path);
     if (!input_json_stream.is_open()) {
@@ -119,11 +146,11 @@ int json_v_converter(const string &input_json_path,
     } catch (const json::parse_error &e) {
         cerr << "Error: JSON parse error: " << e.what() << " in file "
              << input_json_path << endl;
+        input_json_stream.close();
         return 1;
     }
     input_json_stream.close();
 
-    // 检查必要的字段是否存在
     if (!data.contains("variable_list") || !data["variable_list"].is_array() ||
         !data.contains("constraint_list") ||
         !data["constraint_list"].is_array()) {
@@ -133,19 +160,12 @@ int json_v_converter(const string &input_json_path,
         return 1;
     }
 
-    // 需要构建的.v文件
     vector<string> v_lines;
-
-    // 根据输入格式，data中有两个列表variable_list和constraint_list
     json variable_list = data["variable_list"];
-    json constraint_list = data["constraint_list"];
-    int N = variable_list.size();
-    int M = constraint_list.size();
+    json constraint_list_json = data["constraint_list"];
 
-    // 变量声明
     v_lines.push_back("module from_json(");
     for (const auto &var : variable_list) {
-        // eg:     input wire [6:0] var0,
         if (!var.contains("name") || !var["name"].is_string() ||
             !var.contains("bit_width") || !var["bit_width"].is_number()) {
             cerr << "Warning: Skipping malformed variable entry in JSON."
@@ -160,80 +180,184 @@ int json_v_converter(const string &input_json_path,
     v_lines.push_back("    output wire result");
     v_lines.push_back(");");
 
-    // 普通约束
-    int num_cnstr = 0;
-    for (const auto &cnstr : constraint_list) {
-        // eg:      assign cnstr0 = ~var0 + var1;
-        //          assign cnstr0_redor = |cnstr0;
-        string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
-        string line2 = "    assign cnstr" + to_string(num_cnstr) +
-                       "_redor = |(" + expression_tree(cnstr) + ");";
+    std::vector<ConstraintInternalInfo> all_constraints_info;
+    std::map<std::string, ExpressionDetail>
+        all_found_divisors_map; // To collect unique divisors
 
-        v_lines.push_back(line1);
-        v_lines.push_back(line2);
-        num_cnstr++;
+    int current_constraint_verilog_idx = 0; // Used for cnstrX_redor naming
+
+    // Process original constraints from constraint_list
+    for (size_t i = 0; i < constraint_list_json.size(); ++i) {
+        const auto &cnstr_json_node = constraint_list_json[i];
+        ExpressionDetail detail =
+            get_expression_details(cnstr_json_node, all_found_divisors_map);
+        ConstraintInternalInfo info;
+        info.verilog_expression_body = detail.verilog_expr_str;
+        info.variable_ids = detail.variable_ids;
+        info.assigned_wire_name =
+            "cnstr" + to_string(current_constraint_verilog_idx) + "_redor";
+        info.original_json_constraint_index = static_cast<int>(i);
+        all_constraints_info.push_back(info);
+        current_constraint_verilog_idx++;
     }
 
-    // 特殊约束：分母不为零
-    for (string cnstr : special_cnstrs) {
-        string line1 = "    wire cnstr" + to_string(num_cnstr) + "_redor;";
-        // 分母不为零的约束是表达式本身不等于0
-        string line2 = "    assign cnstr" + to_string(num_cnstr) +
-                       "_redor = |(" + cnstr + " != 0);";
-        v_lines.push_back(line1);
-        v_lines.push_back(line2);
-        num_cnstr++;
+    // Process special constraints (divisors != 0)
+    for (const auto &pair_str_detail : all_found_divisors_map) {
+        const ExpressionDetail &div_detail = pair_str_detail.second;
+        ConstraintInternalInfo info;
+        info.verilog_expression_body =
+            "(" + div_detail.verilog_expr_str + " != 0)";
+        info.variable_ids =
+            div_detail.variable_ids; // Vars from the divisor itself
+        info.assigned_wire_name =
+            "cnstr" + to_string(current_constraint_verilog_idx) + "_redor";
+        info.original_json_constraint_index = -1; // Mark as special
+        all_constraints_info.push_back(info);
+        current_constraint_verilog_idx++;
     }
 
-    // 结果输出
+    // Generate Verilog wires and assignments for all effective constraints
+    for (const auto &info : all_constraints_info) {
+        v_lines.push_back("    wire " + info.assigned_wire_name + ";");
+        v_lines.push_back("    assign " + info.assigned_wire_name + " = |(" +
+                          info.verilog_expression_body + ");");
+    }
+
+    // Generate result assignment
     string result_assign = "    assign result = ";
-    if (num_cnstr == 0) {
-        // 如果没有约束，结果始终为真 (1'b1)
-        result_assign += "1'b1;";
+    if (all_constraints_info.empty()) {
+        result_assign += "1'b1;"; // No constraints, result is true
     } else {
-        for (int i = 0; i < num_cnstr; i++) {
-            result_assign += "cnstr" + to_string(i) + "_redor";
-            if (i == num_cnstr - 1)
+        for (size_t i = 0; i < all_constraints_info.size(); ++i) {
+            result_assign += all_constraints_info[i].assigned_wire_name;
+            if (i == all_constraints_info.size() - 1) {
                 result_assign += ";";
-            else
+            } else {
                 result_assign += " & ";
+            }
         }
     }
-
     v_lines.push_back(result_assign);
     v_lines.push_back("endmodule");
 
-    // 文件名处理和写入
+    // --- Component Identification ---
+    json components_json_output_data = json::object();
+    if (!all_constraints_info.empty()) {
+        int num_effective_constraints = all_constraints_info.size();
+        std::vector<int> dsu_parent(num_effective_constraints);
+        std::iota(dsu_parent.begin(), dsu_parent.end(),
+                  0); // Fill with 0, 1, 2, ...
+
+        std::function<int(int)> find_set = [&](int i) -> int {
+            if (dsu_parent[i] == i)
+                return i;
+            return dsu_parent[i] = find_set(dsu_parent[i]);
+        };
+        std::function<void(int, int)> unite_sets = [&](int i, int j) {
+            i = find_set(i);
+            j = find_set(j);
+            if (i != j)
+                dsu_parent[j] = i;
+        };
+
+        std::map<int, std::vector<int>> var_to_constraint_indices_map;
+        for (int i = 0; i < num_effective_constraints; ++i) {
+            for (int var_id : all_constraints_info[i].variable_ids) {
+                var_to_constraint_indices_map[var_id].push_back(i);
+            }
+        }
+
+        for (const auto &pair_var_cnstrs_indices :
+             var_to_constraint_indices_map) {
+            const std::vector<int> &cnstr_indices =
+                pair_var_cnstrs_indices.second;
+            if (cnstr_indices.size() > 1) {
+                for (size_t i = 0; i < cnstr_indices.size() - 1; ++i) {
+                    unite_sets(cnstr_indices[i], cnstr_indices[i + 1]);
+                }
+            }
+        }
+
+        std::map<int, std::vector<int>> dsu_root_to_internal_indices_map;
+        for (int i = 0; i < num_effective_constraints; ++i) {
+            dsu_root_to_internal_indices_map[find_set(i)].push_back(i);
+        }
+
+        json components_array = json::array();
+        int comp_id_counter = 0;
+        for (const auto &pair_root_indices : dsu_root_to_internal_indices_map) {
+            json component_entry = json::object();
+            component_entry["component_id"] = comp_id_counter++;
+
+            json constraint_wire_names_array = json::array();
+            json constraint_internal_indices_array =
+                json::array(); // Index in all_constraints_info
+            std::set<int> component_total_vars;
+
+            for (int internal_idx : pair_root_indices.second) {
+                constraint_wire_names_array.push_back(
+                    all_constraints_info[internal_idx].assigned_wire_name);
+                constraint_internal_indices_array.push_back(internal_idx);
+                component_total_vars.insert(
+                    all_constraints_info[internal_idx].variable_ids.begin(),
+                    all_constraints_info[internal_idx].variable_ids.end());
+            }
+            component_entry["constraint_wires"] = constraint_wire_names_array;
+            component_entry["constraint_internal_indices"] =
+                constraint_internal_indices_array;
+            component_entry["variables"] =
+                component_total_vars; // Set automatically handles uniqueness
+
+            components_array.push_back(component_entry);
+        }
+        components_json_output_data["components"] = components_array;
+    } else {
+        components_json_output_data["components"] =
+            json::array(); // Empty components array
+    }
+
+    // --- File Naming and Writing ---
     filesystem::path input_json_path_obj(input_json_path);
     string filename_no_ext = input_json_path_obj.stem().string();
     string parent_dir_name =
         input_json_path_obj.parent_path().filename().string();
-
     string test_id;
     if (!parent_dir_name.empty() && parent_dir_name != "." &&
-        parent_dir_name != "/") {
+        parent_dir_name != "/" && parent_dir_name != "..") {
         test_id = parent_dir_name + "_" + filename_no_ext;
     } else {
         test_id = filename_no_ext;
     }
 
+    // Write Verilog file
     filesystem::path output_v_path =
         filesystem::path(output_v_dir) / (test_id + ".v");
-
     ofstream output_v_stream(output_v_path);
-
     if (!output_v_stream.is_open()) {
         cerr << "Error: Could not open output Verilog file: " << output_v_path
              << endl;
         return 1;
     }
-
     for (const string &line : v_lines) {
         output_v_stream << line << endl;
     }
     output_v_stream.close();
-
     cout << "Verilog file generated successfully: " << output_v_path << endl;
+
+    // Write Component JSON file
+    filesystem::path output_components_path =
+        filesystem::path(output_v_dir) / (test_id + "_components.json");
+    ofstream output_components_stream(output_components_path);
+    if (output_components_stream.is_open()) {
+        output_components_stream << components_json_output_data.dump(4) << endl;
+        output_components_stream.close();
+        cout << "Component metadata file generated successfully: "
+             << output_components_path << endl;
+    } else {
+        cerr << "Error: Could not open component metadata file for writing: "
+             << output_components_path << endl;
+        // Not returning error for this, as Verilog generation might be primary goal for some tests
+    }
 
     return 0;
 }

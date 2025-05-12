@@ -36,7 +36,8 @@ string to_hex_string(unsigned long long value, int bit_width);
 
 // --- NEW HELPER FUNCTION PROTOTYPE for variable ordering ---
 static std::vector<int> determine_bdd_variable_order(
-    int nI_total, const std::vector<int> &aig_primary_input_literals,
+    int nI_total, const std::vector<int> &aig_pi_literals_in_file_order,
+    const std::vector<std::vector<int>> &component_aig_pi_literal_groups,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions);
 
@@ -322,18 +323,24 @@ static bool read_aig_structure(std::ifstream &aig_file_stream, AigData &data) {
 }
 
 // Helper function to create BDD variables
-static bool
-create_bdd_variables(DdManager *manager, const AigData &data,
-                     std::map<int, DdNode *> &literal_to_bdd_map,
-                     std::vector<DdNode *> &input_vars_bdd,
-                     std::map<int, int> &cudd_idx_to_original_aig_pi_file_idx) {
+static bool create_bdd_variables(
+    DdManager *manager, const AigData &data,
+    std::map<int, DdNode *> &literal_to_bdd_map,
+    std::vector<DdNode *> &input_vars_bdd, // Indexed by AIG PI file order
+    std::map<int, int> &cudd_idx_to_original_aig_pi_file_idx,
+    const std::vector<std::vector<int>>
+        &component_aig_pi_literal_groups) // New parameter
+{
     auto var_order_start_time = std::chrono::high_resolution_clock::now();
     input_vars_bdd.resize(data.nI);
 
+    // Determine_bdd_variable_order now uses component_aig_pi_literal_groups
     std::vector<int> ordered_aig_pi_literals_for_bdd_creation =
-        determine_bdd_variable_order(data.nI, data.primary_input_literals,
-                                     data.circuit_output_literals,
-                                     data.and_gate_definitions);
+        determine_bdd_variable_order(
+            data.nI,
+            data.primary_input_literals, // This is AigData.primary_input_literals
+            component_aig_pi_literal_groups, data.circuit_output_literals,
+            data.and_gate_definitions);
     auto var_order_end_time = std::chrono::high_resolution_clock::now();
     auto var_order_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -350,9 +357,11 @@ create_bdd_variables(DdManager *manager, const AigData &data,
         if (i < ordered_aig_pi_literals_for_bdd_creation.size()) {
             current_aig_pi_literal_to_create =
                 ordered_aig_pi_literals_for_bdd_creation[i];
-        } else {
+        } else { // Should not happen if determine_bdd_variable_order is correct
             bool found_uncreated = false;
-            for (int orig_pi_lit : data.primary_input_literals) {
+            for (
+                int orig_pi_lit :
+                data.primary_input_literals) { // data.primary_input_literals is the vector of AIG PI lits in file order
                 if (literal_to_bdd_map.find(orig_pi_lit) ==
                     literal_to_bdd_map.end()) {
                     current_aig_pi_literal_to_create = orig_pi_lit;
@@ -362,11 +371,12 @@ create_bdd_variables(DdManager *manager, const AigData &data,
             }
             if (!found_uncreated) {
                 cerr << "Error: Logic flaw in assigning remaining PIs for BDD "
-                        "creation."
+                        "creation (all PIs already processed but i < data.nI)."
                      << endl;
                 return false;
             }
-            cout << "Warning: Fallback PI assignment for BDD var creation: "
+            cout << "Warning: Fallback PI assignment (should be covered by "
+                    "determine_bdd_variable_order): "
                  << current_aig_pi_literal_to_create << endl;
         }
 
@@ -383,21 +393,20 @@ create_bdd_variables(DdManager *manager, const AigData &data,
         Cudd_Ref(var_node);
         Cudd_Ref(Cudd_Not(var_node));
 
-        int original_pi_idx = data.literal_to_original_pi_index.at(
+        // data.literal_to_original_pi_index maps AIG PI literal to its 0-based index in AIG file PI list
+        int aig_pi_file_order_idx = data.literal_to_original_pi_index.at(
             current_aig_pi_literal_to_create);
-        input_vars_bdd[original_pi_idx] = var_node;
+        input_vars_bdd[aig_pi_file_order_idx] = var_node;
 
-        // Populate cudd_idx_to_original_aig_pi_file_idx
-        int cudd_var_idx = Cudd_NodeReadIndex(var_node);
+        int cudd_var_idx = Cudd_NodeReadIndex(var_node); // This is 'i'
         if (Cudd_bddIsVar(manager, var_node)) {
             cudd_idx_to_original_aig_pi_file_idx[cudd_var_idx] =
-                original_pi_idx;
+                aig_pi_file_order_idx;
         } else {
             cerr << "Warning: PI BDD node for AIG lit "
-                 << current_aig_pi_literal_to_create << " (original index "
-                 << original_pi_idx << ", CUDD index " << cudd_var_idx
-                 << ") is not a simple BDD variable node after creation."
-                 << endl;
+                 << current_aig_pi_literal_to_create << " (original file index "
+                 << aig_pi_file_order_idx << ", CUDD index " << cudd_var_idx
+                 << ") is not a simple BDD variable node." << endl;
         }
     }
     cout << "Debug: Finished creating BDD input variables." << endl;
@@ -718,117 +727,220 @@ cleanup_cudd_resources(DdManager *manager, DdNode *bdd_circuit_output,
 }
 
 // Refactored main BDD solver function
-int aig_to_bdd_solver(const string &aig_file_path,
-                      const string &original_json_path, int num_samples,
-                      const string &result_json_path,
-                      unsigned int random_seed) {
+int aig_to_bdd_solver(
+    const string &aig_file_path,
+    const string
+        &original_json_path, // Used for PI name/ID mapping and sampling output
+    int num_samples, const string &result_json_path, unsigned int random_seed) {
     auto function_start_time = std::chrono::high_resolution_clock::now();
     rng.seed(random_seed);
 
     DdManager *manager = nullptr;
     DdNode *bdd_circuit_output = nullptr;
     AigData aig_data;
-    std::map<int, DdNode *> literal_to_bdd_map;
+    std::map<int, DdNode *> literal_to_bdd_map; // AIG literal -> DdNode*
     std::vector<DdNode *>
-        input_vars_bdd; // Stores DdNode* for PIs, indexed by original AIG file order
+        input_vars_bdd; // Stores DdNode* for PIs, indexed by AIG PI file order (0 to nI-1)
     std::map<int, int>
-        cudd_idx_to_original_aig_pi_file_idx; // Maps CUDD var index to AIG PI file index
+        cudd_idx_to_original_aig_pi_file_idx; // CUDD var index -> AIG PI file order index
 
     manager = initialize_cudd_manager();
     if (!manager)
         return 1;
 
+    // 1. Read AIG file
     std::ifstream aig_file_stream(aig_file_path);
     if (!aig_file_stream.is_open()) {
         cerr << "Error: Could not open AIG file: " << aig_file_path << endl;
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
         return 1;
     }
-
     if (!parse_aig_header(aig_file_stream, aig_data)) {
         aig_file_stream.close();
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
         return 1;
     }
-
     if (!read_aig_structure(aig_file_stream, aig_data)) {
         aig_file_stream.close();
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
         return 1;
     }
-    aig_file_stream.close(); // Close AIG file after reading its structure
+    aig_file_stream.close();
 
-    if (!create_bdd_variables(manager, aig_data, literal_to_bdd_map,
-                              input_vars_bdd,
-                              cudd_idx_to_original_aig_pi_file_idx)) {
-        cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
-    }
-
-    if (!build_bdd_for_and_gates(manager, aig_data, literal_to_bdd_map)) {
-        cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
-    }
-
-    bdd_circuit_output =
-        get_final_bdd_output(manager, aig_data, literal_to_bdd_map);
-    if (!bdd_circuit_output) {
-        cleanup_cudd_resources(
-            manager, bdd_circuit_output,
-            literal_to_bdd_map); // bdd_circuit_output might be null here
-        return 1;
-    }
-    cout << "AIG 文件解析成功，BDD 构建初步完成。" << endl;
-
+    // 2. Load original JSON (contains variable_list with "id"s)
+    // This is needed early for determine_bdd_variable_order to map component vars
     auto original_json_read_start_time =
         std::chrono::high_resolution_clock::now();
-    ifstream original_json_stream(original_json_path);
-    json original_data;
-    if (original_json_stream.is_open()) {
-        original_json_stream >> original_data;
-        original_json_stream.close();
+    ifstream original_json_fstream(original_json_path);
+    json original_json_data_full;
+    if (original_json_fstream.is_open()) {
+        original_json_fstream >> original_json_data_full;
+        original_json_fstream.close();
     } else {
-        cerr << "Warning: Could not open original JSON for variable info: "
+        cerr << "Error: Could not open original JSON for variable info: "
              << original_json_path << endl;
-        // Continue with empty original_variable_list if file not found or unreadable, or handle as fatal error:
-        // cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-        // return 1;
+        cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
+        return 1;
     }
-    json original_variable_list = original_data.contains("variable_list")
-                                      ? original_data["variable_list"]
-                                      : json::array();
+    json original_variable_list_from_json =
+        original_json_data_full.contains("variable_list")
+            ? original_json_data_full["variable_list"]
+            : json::array();
+    if (original_variable_list_from_json.empty() && aig_data.nI > 0) {
+        cerr
+            << "Error: Original JSON variable_list is empty but AIG has inputs."
+            << endl;
+        cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
+        return 1;
+    }
     auto original_json_read_end_time =
         std::chrono::high_resolution_clock::now();
     auto original_json_read_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             original_json_read_end_time - original_json_read_start_time);
-    cout << "LOG: Reading original JSON took "
+    cout << "LOG: Reading original JSON for var mapping took "
          << original_json_read_duration.count() << " ms." << endl;
 
+    // 3. Load Component Metadata JSON
+    json components_data;
+    std::filesystem::path aig_p(aig_file_path);
+    string components_json_filename =
+        aig_p.stem().string() + "_components.json";
+    std::filesystem::path components_json_path =
+        aig_p.parent_path() / components_json_filename;
+
+    ifstream components_fstream(components_json_path.string());
+    if (components_fstream.is_open()) {
+        try {
+            components_fstream >> components_data;
+            cout << "LOG: Component metadata loaded from "
+                 << components_json_path.string() << endl;
+        } catch (const json::parse_error &e) {
+            cerr << "Warning: Could not parse component metadata JSON: "
+                 << e.what()
+                 << ". Proceeding without component-guided ordering." << endl;
+            components_data =
+                json::object(); // Ensure it's a valid empty object
+        }
+        components_fstream.close();
+    } else {
+        cout << "LOG: Component metadata file not found at "
+             << components_json_path.string()
+             << ". Proceeding without component-guided ordering." << endl;
+        components_data = json::object(); // Ensure it's a valid empty object
+    }
+
+    // 4. Prepare component_aig_pi_literal_groups for determine_bdd_variable_order
+    std::vector<std::vector<int>> component_aig_pi_literal_groups;
+    if (components_data.contains("components") &&
+        components_data["components"].is_array()) {
+        // Map: original JSON "id" -> AIG PI file order index (0 to nI-1)
+        std::map<int, int> original_json_id_to_aig_pi_file_idx;
+        for (int i = 0; i < original_variable_list_from_json.size(); ++i) {
+            if (original_variable_list_from_json[i].contains("id")) {
+                original_json_id_to_aig_pi_file_idx
+                    [original_variable_list_from_json[i]["id"].get<int>()] = i;
+            } else {
+                cerr
+                    << "Warning: Variable entry in original_json_path at index "
+                    << i << " missing 'id'." << endl;
+            }
+        }
+
+        for (const auto &component : components_data["components"]) {
+            std::vector<int> current_comp_aig_lits;
+            if (component.contains("variables") &&
+                component["variables"].is_array()) {
+                for (int oj_var_id : component["variables"]) {
+                    auto it_map =
+                        original_json_id_to_aig_pi_file_idx.find(oj_var_id);
+                    if (it_map != original_json_id_to_aig_pi_file_idx.end()) {
+                        int aig_pi_file_idx = it_map->second;
+                        if (aig_pi_file_idx <
+                            aig_data.primary_input_literals.size()) {
+                            // aig_data.primary_input_literals is vector of AIG literals, indexed by their file order (0 to nI-1)
+                            current_comp_aig_lits.push_back(
+                                aig_data
+                                    .primary_input_literals[aig_pi_file_idx]);
+                        } else {
+                            cerr << "Warning: AIG PI file index "
+                                 << aig_pi_file_idx
+                                 << " out of bounds for component variable id "
+                                 << oj_var_id << endl;
+                        }
+                    } else {
+                        cerr << "Warning: Original JSON variable id "
+                             << oj_var_id
+                             << " from components file not found in "
+                                "original_json_path variable_list."
+                             << endl;
+                    }
+                }
+            }
+            if (!current_comp_aig_lits.empty()) {
+                // Remove duplicates within the group, though ideally json2v provides unique vars per component list
+                std::sort(current_comp_aig_lits.begin(),
+                          current_comp_aig_lits.end());
+                current_comp_aig_lits.erase(
+                    std::unique(current_comp_aig_lits.begin(),
+                                current_comp_aig_lits.end()),
+                    current_comp_aig_lits.end());
+                component_aig_pi_literal_groups.push_back(
+                    current_comp_aig_lits);
+            }
+        }
+    }
+
+    // 5. Create BDD variables (calls modified determine_bdd_variable_order)
+    if (!create_bdd_variables(
+            manager, aig_data, literal_to_bdd_map, input_vars_bdd,
+            cudd_idx_to_original_aig_pi_file_idx,
+            component_aig_pi_literal_groups)) { // Pass component groups
+        cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
+        return 1;
+    }
+
+    // 6. Build BDDs for AND gates
+    if (!build_bdd_for_and_gates(manager, aig_data, literal_to_bdd_map)) {
+        cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
+        return 1;
+    }
+
+    // 7. Get final BDD output node
+    bdd_circuit_output =
+        get_final_bdd_output(manager, aig_data, literal_to_bdd_map);
+    if (!bdd_circuit_output) {
+        cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
+        return 1;
+    }
+    cout << "AIG parsing and BDD construction complete." << endl;
+
+    // 8. Perform BDD Sampling
     json assignment_list;
     try {
         assignment_list = perform_bdd_sampling(
             manager, bdd_circuit_output, num_samples, aig_data.nI,
-            original_variable_list, input_vars_bdd,
-            cudd_idx_to_original_aig_pi_file_idx);
+            original_variable_list_from_json, // Use the loaded list
+            input_vars_bdd, cudd_idx_to_original_aig_pi_file_idx);
     } catch (const std::runtime_error &e) {
         cerr << "Error during BDD sampling: " << e.what() << endl;
         cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
         return 1;
     }
 
+    // 9. Format and Write Results
     if (!format_and_write_results(result_json_path, assignment_list)) {
         cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
         return 1;
     }
 
+    // 10. Cleanup
     cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-    manager = nullptr; // Avoid double free if Cudd_Quit was called
+    manager = nullptr;
     bdd_circuit_output = nullptr;
 
-    std::cout << "BDD 求解器完成。结果已写入到 " << result_json_path
+    std::cout << "BDD solver finished. Results written to " << result_json_path
               << std::endl;
-
     auto function_end_time = std::chrono::high_resolution_clock::now();
     auto function_duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -874,60 +986,111 @@ string to_hex_string(unsigned long long value, int bit_width) {
 
 // --- NEW HELPER FUNCTION IMPLEMENTATION for variable ordering ---
 static std::vector<int> determine_bdd_variable_order(
-    int nI_total, const std::vector<int> &aig_primary_input_literals,
+    int nI_total, const std::vector<int> &aig_pi_literals_in_file_order,
+    const std::vector<std::vector<int>> &component_aig_pi_literal_groups,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
     cout << "Debug: Determining BDD variable order..." << endl;
-    std::vector<int> ordered_pis_for_bdd_creation;
-    std::set<int> visited_nodes_for_ordering_dfs;
-    std::set<int> added_pis_to_order;
-    std::set<int> primary_input_set;
-    for (int pi_lit : aig_primary_input_literals) {
-        primary_input_set.insert(pi_lit);
-    }
+    std::vector<int> ordered_aig_pis_for_bdd_creation;
+    std::set<int> added_aig_pi_literals_to_order;
 
-    std::function<void(int)> order_dfs = [&](int current_node_literal) {
-        int regular_node_lit = (current_node_literal / 2) * 2;
-
-        if (visited_nodes_for_ordering_dfs.count(regular_node_lit)) {
-            return;
-        }
-        visited_nodes_for_ordering_dfs.insert(regular_node_lit);
-
-        // Check if it's a primary input
-        if (primary_input_set.count(regular_node_lit)) {
-            if (added_pis_to_order.find(regular_node_lit) ==
-                added_pis_to_order.end()) {
-                ordered_pis_for_bdd_creation.push_back(regular_node_lit);
-                added_pis_to_order.insert(regular_node_lit);
-            }
-            return; // Stop recursion at PIs
-        }
-
-        // Check if it's an AND gate output
-        auto it = and_gate_definitions.find(regular_node_lit);
-        if (it != and_gate_definitions.end()) {
-            const auto &inputs = it->second;
-            order_dfs(inputs.first);  // RHS1
-            order_dfs(inputs.second); // RHS2
-        }
-    };
-
-    // Start DFS from each primary output of the circuit
-    for (int output_lit : circuit_output_literals_from_aig) {
-        if (output_lit == 0 || output_lit == 1)
-            continue; // Skip constant outputs for DFS start
-        order_dfs(output_lit);
-    }
-
-    if (ordered_pis_for_bdd_creation.size() < nI_total) {
-        for (int pi_lit : aig_primary_input_literals) {
-            if (added_pis_to_order.find(pi_lit) == added_pis_to_order.end()) {
-                ordered_pis_for_bdd_creation.push_back(pi_lit);
-                added_pis_to_order.insert(pi_lit);
+    // Add PIs based on component groups first
+    if (!component_aig_pi_literal_groups.empty()) {
+        cout << "Debug: Using component data for variable ordering. Groups "
+                "found: "
+             << component_aig_pi_literal_groups.size() << endl;
+        for (const auto &group : component_aig_pi_literal_groups) {
+            for (int aig_pi_lit : group) {
+                if (added_aig_pi_literals_to_order.find(aig_pi_lit) ==
+                    added_aig_pi_literals_to_order.end()) {
+                    ordered_aig_pis_for_bdd_creation.push_back(aig_pi_lit);
+                    added_aig_pi_literals_to_order.insert(aig_pi_lit);
+                }
             }
         }
+    } else {
+        cout << "Debug: No component data provided or components are empty; "
+                "proceeding with DFS-based ordering."
+             << endl;
     }
 
-    return ordered_pis_for_bdd_creation;
+    // Fallback: Add remaining PIs using DFS from outputs (for PIs not in any component or if no components)
+    if (added_aig_pi_literals_to_order.size() < nI_total) {
+        cout << "Debug: " << added_aig_pi_literals_to_order.size() << "/"
+             << nI_total
+             << " PIs ordered by components. Using DFS for remaining." << endl;
+
+        std::set<int>
+            visited_nodes_for_ordering_dfs; // AIG literals (regular form)
+        std::set<int> aig_pi_literals_set(aig_pi_literals_in_file_order.begin(),
+                                          aig_pi_literals_in_file_order.end());
+
+        std::function<void(int)> order_dfs = [&](int current_node_literal) {
+            int regular_node_lit = (current_node_literal / 2) *
+                                   2; // Normalize to even literal (var ID)
+
+            if (visited_nodes_for_ordering_dfs.count(regular_node_lit)) {
+                return;
+            }
+            visited_nodes_for_ordering_dfs.insert(regular_node_lit);
+
+            // Check if it's a primary input AIG literal
+            if (aig_pi_literals_set.count(regular_node_lit)) {
+                if (added_aig_pi_literals_to_order.find(regular_node_lit) ==
+                    added_aig_pi_literals_to_order.end()) {
+                    ordered_aig_pis_for_bdd_creation.push_back(
+                        regular_node_lit);
+                    added_aig_pi_literals_to_order.insert(regular_node_lit);
+                }
+                return;
+            }
+
+            // If it's an AND gate, recurse on its inputs
+            auto it = and_gate_definitions.find(regular_node_lit);
+            if (it != and_gate_definitions.end()) {
+                const auto &inputs = it->second;
+                // Process inputs in a fixed order for some determinism, though DFS doesn't guarantee specific PI ordering from this
+                order_dfs(inputs.first);  // RHS1
+                order_dfs(inputs.second); // RHS2
+            }
+        };
+
+        // Start DFS from each primary output of the circuit
+        for (int output_lit : circuit_output_literals_from_aig) {
+            if (output_lit == 0 || output_lit == 1)
+                continue; // Skip constant outputs
+            if (added_aig_pi_literals_to_order.size() == nI_total)
+                break; // All PIs ordered
+            order_dfs(output_lit);
+        }
+    }
+
+    // Final check: Add any PIs not covered by components or DFS (should be rare if DFS covers all driving cones)
+    if (added_aig_pi_literals_to_order.size() < nI_total) {
+        cout << "Debug: " << added_aig_pi_literals_to_order.size() << "/"
+             << nI_total << " PIs ordered. Appending any remaining PIs."
+             << endl;
+        for (int aig_pi_lit : aig_pi_literals_in_file_order) {
+            if (added_aig_pi_literals_to_order.find(aig_pi_lit) ==
+                added_aig_pi_literals_to_order.end()) {
+                ordered_aig_pis_for_bdd_creation.push_back(aig_pi_lit);
+                added_aig_pi_literals_to_order.insert(aig_pi_lit);
+                cout << "Warning: PI AIG literal " << aig_pi_lit
+                     << " added as fallback." << endl;
+            }
+        }
+    }
+
+    if (ordered_aig_pis_for_bdd_creation.size() != nI_total) {
+        cerr << "Error: Final BDD variable order size ("
+             << ordered_aig_pis_for_bdd_creation.size()
+             << ") does not match total number of PIs (" << nI_total << ")."
+             << endl;
+        // Potentially throw an error or return a partially valid list, though CUDD might misbehave.
+        // For safety, could clear and return empty to signal a major problem.
+    }
+
+    cout << "Debug: BDD variable order determined. Total PIs in order: "
+         << ordered_aig_pis_for_bdd_creation.size() << endl;
+    return ordered_aig_pis_for_bdd_creation;
 }
