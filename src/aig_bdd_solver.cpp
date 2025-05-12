@@ -960,14 +960,62 @@ static void get_pi_support_for_node_dfs_recursive(
     }
 }
 
-// version 1
+static void perform_simple_dfs_for_ordering(
+    int current_node_literal, const std::set<int> &all_pi_literals_set,
+    const std::map<int, std::pair<int, int>> &and_gate_definitions,
+    std::set<int> &visited_nodes_for_ordering_dfs,
+    std::set<int> &added_pis_to_final_order_set,
+    std::vector<int> &ordered_pis_for_bdd_creation,
+    bool
+        process_first_child_first) { // true for inputs.first then inputs.second
+
+    int regular_node_lit = (current_node_literal / 2) * 2;
+    if (regular_node_lit == 0 || regular_node_lit == 1)
+        return;
+    if (visited_nodes_for_ordering_dfs.count(regular_node_lit))
+        return;
+    visited_nodes_for_ordering_dfs.insert(regular_node_lit);
+
+    if (all_pi_literals_set.count(regular_node_lit)) {
+        if (added_pis_to_final_order_set.find(regular_node_lit) ==
+            added_pis_to_final_order_set.end()) {
+            ordered_pis_for_bdd_creation.push_back(regular_node_lit);
+            added_pis_to_final_order_set.insert(regular_node_lit);
+        }
+        return;
+    }
+    auto it_and = and_gate_definitions.find(regular_node_lit);
+    if (it_and != and_gate_definitions.end()) {
+        const auto &inputs = it_and->second;
+        if (process_first_child_first) {
+            perform_simple_dfs_for_ordering(
+                inputs.first, all_pi_literals_set, and_gate_definitions,
+                visited_nodes_for_ordering_dfs, added_pis_to_final_order_set,
+                ordered_pis_for_bdd_creation, process_first_child_first);
+            perform_simple_dfs_for_ordering(
+                inputs.second, all_pi_literals_set, and_gate_definitions,
+                visited_nodes_for_ordering_dfs, added_pis_to_final_order_set,
+                ordered_pis_for_bdd_creation, process_first_child_first);
+        } else { // process second child first
+            perform_simple_dfs_for_ordering(
+                inputs.second, all_pi_literals_set, and_gate_definitions,
+                visited_nodes_for_ordering_dfs, added_pis_to_final_order_set,
+                ordered_pis_for_bdd_creation, process_first_child_first);
+            perform_simple_dfs_for_ordering(
+                inputs.first, all_pi_literals_set, and_gate_definitions,
+                visited_nodes_for_ordering_dfs, added_pis_to_final_order_set,
+                ordered_pis_for_bdd_creation, process_first_child_first);
+        }
+    }
+}
+
 static std::vector<int> determine_bdd_variable_order(
     int nI_total_from_header,
     const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    std::cout << "Debug: Determining BDD variable order (V4: DFS with PI "
-                 "support heuristic, larger first)..."
+    std::cout << "Debug: Determining BDD variable order (POs Strategy: Large "
+                 "In Middle by PI Support, DFS: Simple Fixed 1-2)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
@@ -976,58 +1024,91 @@ static std::vector<int> determine_bdd_variable_order(
     for (int pi_lit : aig_primary_input_literals) {
         all_pi_literals_set.insert((pi_lit / 2) * 2);
     }
-    std::map<int, std::set<int>> memoized_pi_supports;
+    std::map<int, std::set<int>> memoized_pi_supports_for_po_sorting;
     std::set<int> visited_nodes_for_ordering_dfs;
 
-    std::function<void(int)> order_dfs_main = [&](int current_node_literal) {
-        int regular_node_lit = (current_node_literal / 2) * 2;
-        if (regular_node_lit == 0 || regular_node_lit == 1)
-            return;
-        if (visited_nodes_for_ordering_dfs.count(regular_node_lit))
-            return;
-        visited_nodes_for_ordering_dfs.insert(regular_node_lit);
-
-        if (all_pi_literals_set.count(regular_node_lit)) {
-            if (added_pis_to_final_order_set.find(regular_node_lit) ==
-                added_pis_to_final_order_set.end()) {
-                ordered_pis_for_bdd_creation.push_back(regular_node_lit);
-                added_pis_to_final_order_set.insert(regular_node_lit);
-            }
-            return;
-        }
-        auto it_and = and_gate_definitions.find(regular_node_lit);
-        if (it_and != and_gate_definitions.end()) {
-            const auto &inputs = it_and->second;
-            std::set<int> support1 =
-                get_pi_support(inputs.first, and_gate_definitions,
-                               all_pi_literals_set, memoized_pi_supports);
-            std::set<int> support2 =
-                get_pi_support(inputs.second, and_gate_definitions,
-                               all_pi_literals_set, memoized_pi_supports);
-            // 反转启发式：优先处理PI支持集较大（或相等）的子节点
-            if (support1.size() >=
-                support2
-                    .size()) { // 注意这里是 >= 而不是 > 使得相等时也优先第一个
-                order_dfs_main(inputs.first);
-                order_dfs_main(inputs.second);
-            } else {
-                order_dfs_main(inputs.second);
-                order_dfs_main(inputs.first);
-            }
-        }
-    };
-
-    // (DFS启动和补充PI的逻辑与V1相同)
+    std::vector<std::pair<size_t, int>>
+        po_info_list; // <support_size, po_literal>
     if (!circuit_output_literals_from_aig.empty()) {
         for (int po_lit : circuit_output_literals_from_aig) {
             if (po_lit == 0 || po_lit == 1)
-                continue;
-            order_dfs_main(po_lit);
+                continue; // Skip constant POs
+            std::set<int> support = get_pi_support(
+                po_lit, and_gate_definitions, all_pi_literals_set,
+                memoized_pi_supports_for_po_sorting);
+            po_info_list.push_back({support.size(), po_lit});
         }
-    } else {
-        std::cout << "Warning: No primary outputs for DFS start in V4."
-                  << std::endl;
+        // Sort POs by PI support size, ascending (smallest support first)
+        std::sort(po_info_list.begin(), po_info_list.end());
     }
+
+    std::vector<int> final_po_processing_order;
+    if (!po_info_list.empty()) {
+        size_t n_pos = po_info_list.size();
+        if (n_pos <= 2) {
+            for (const auto &p_info : po_info_list)
+                final_po_processing_order.push_back(p_info.second);
+        } else {
+            // Strategy: Smallest 1/3, then Largest 1/3, then Medium 1/3
+            size_t count_s = n_pos / 3;
+            size_t count_l = n_pos / 3;
+            size_t count_m = n_pos - count_s - count_l;
+
+            // Adjust counts if N%3 is not 0 to distribute remainder, e.g., to medium or largest
+            if (n_pos % 3 == 1) {
+                count_m++;
+            } else if (n_pos % 3 == 2) {
+                count_m++;
+                count_l++;
+            }
+
+            std::vector<int> group_small, group_medium, group_large;
+
+            for (size_t i = 0; i < count_s; ++i)
+                group_small.push_back(po_info_list[i].second);
+            // Largest group is from the end of the sorted list
+            for (size_t i = 0; i < count_l; ++i)
+                group_large.push_back(po_info_list[n_pos - 1 - i].second);
+            std::reverse(
+                group_large.begin(),
+                group_large.end()); // So largest of the large comes first
+
+            for (size_t i = 0; i < count_m; ++i)
+                group_medium.push_back(po_info_list[count_s + i].second);
+
+            final_po_processing_order.insert(final_po_processing_order.end(),
+                                             group_small.begin(),
+                                             group_small.end());
+            final_po_processing_order.insert(final_po_processing_order.end(),
+                                             group_large.begin(),
+                                             group_large.end());
+            final_po_processing_order.insert(final_po_processing_order.end(),
+                                             group_medium.begin(),
+                                             group_medium.end());
+
+            if (final_po_processing_order.size() != n_pos) { // Sanity check
+                final_po_processing_order.clear();
+                for (const auto &p : po_info_list)
+                    final_po_processing_order.push_back(p.second);
+                cerr << "Warning (LIM): PO partitioning resulted in mismatched "
+                        "count. Falling back to simple ascending support order."
+                     << endl;
+            }
+        }
+    }
+
+    if (!final_po_processing_order.empty()) {
+        // (Optional: Print final_po_processing_order for debugging)
+        for (int po_lit : final_po_processing_order) {
+            perform_simple_dfs_for_ordering(
+                po_lit, all_pi_literals_set, and_gate_definitions,
+                visited_nodes_for_ordering_dfs, added_pis_to_final_order_set,
+                ordered_pis_for_bdd_creation,
+                true); // true for fixed 1-2 AND child order
+        }
+    } // (Else, handle cases with no processable POs as before)
+
+    // Fallback for unvisited PIs (same as previous versions)
     for (int pi_lit_from_file : aig_primary_input_literals) {
         int regular_pi_lit = (pi_lit_from_file / 2) * 2;
         if (all_pi_literals_set.count(regular_pi_lit) &&
@@ -1037,7 +1118,10 @@ static std::vector<int> determine_bdd_variable_order(
             added_pis_to_final_order_set.insert(regular_pi_lit);
         }
     }
-    std::cout << "Debug (V4): Final ordered PIs count: "
+
+    // (Log and validation, same as previous versions)
+    std::cout << "Debug (LIM): Final ordered PIs count: "
               << ordered_pis_for_bdd_creation.size() << std::endl;
+    // (Full logging of ordered_pis_for_bdd_creation can be added here if needed)
     return ordered_pis_for_bdd_creation;
 }
