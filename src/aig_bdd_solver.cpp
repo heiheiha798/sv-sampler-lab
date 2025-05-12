@@ -966,8 +966,8 @@ static std::vector<int> determine_bdd_variable_order(
     const std::vector<int> &aig_primary_input_literals,
     const std::vector<int> &circuit_output_literals_from_aig,
     const std::map<int, std::pair<int, int>> &and_gate_definitions) {
-    std::cout << "Debug: Determining BDD variable order (V3: DFS with PI "
-                 "support heuristic, smaller first)..."
+    std::cout << "Debug: Determining BDD variable order (V4: DFS with PI "
+                 "support heuristic, larger first)..."
               << std::endl;
 
     std::vector<int> ordered_pis_for_bdd_creation;
@@ -1004,7 +1004,10 @@ static std::vector<int> determine_bdd_variable_order(
             std::set<int> support2 =
                 get_pi_support(inputs.second, and_gate_definitions,
                                all_pi_literals_set, memoized_pi_supports);
-            if (support1.size() <= support2.size()) {
+            // 反转启发式：优先处理PI支持集较大（或相等）的子节点
+            if (support1.size() >=
+                support2
+                    .size()) { // 注意这里是 >= 而不是 > 使得相等时也优先第一个
                 order_dfs_main(inputs.first);
                 order_dfs_main(inputs.second);
             } else {
@@ -1013,6 +1016,7 @@ static std::vector<int> determine_bdd_variable_order(
             }
         }
     };
+
     // (DFS启动和补充PI的逻辑与V1相同)
     if (!circuit_output_literals_from_aig.empty()) {
         for (int po_lit : circuit_output_literals_from_aig) {
@@ -1021,7 +1025,7 @@ static std::vector<int> determine_bdd_variable_order(
             order_dfs_main(po_lit);
         }
     } else {
-        std::cout << "Warning: No primary outputs for DFS start in V3."
+        std::cout << "Warning: No primary outputs for DFS start in V4."
                   << std::endl;
     }
     for (int pi_lit_from_file : aig_primary_input_literals) {
@@ -1033,7 +1037,7 @@ static std::vector<int> determine_bdd_variable_order(
             added_pis_to_final_order_set.insert(regular_pi_lit);
         }
     }
-    std::cout << "Debug (V3): Final ordered PIs count: "
+    std::cout << "Debug (V4): Final ordered PIs count: "
               << ordered_pis_for_bdd_creation.size() << std::endl;
     return ordered_pis_for_bdd_creation;
 }
