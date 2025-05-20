@@ -261,6 +261,14 @@ static ExpressionDetail get_expression_details(
                     op_symbol = "==";
                 else if (type == "NEQ")
                     op_symbol = "!=";
+                else if (type == "LT")
+                    op_symbol = "<";
+                else if (type == "LTE")
+                    op_symbol == "<=";
+                else if (type == "GT")
+                    op_symbol == ">";
+                else if (type == "GTE")
+                    op_symbol == ">=";
                 else {
                     current_detail.verilog_expr_str =
                         "/* UNHANDLED_OP_STR: " + type + " */";
