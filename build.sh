@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# 获取当前脚本的目录，并将其赋值给 SCRIPT_DIR 变量
-SCRIPT_DIR=$(dirname "$0")
-
 apt install sudo
 sudo apt update
 sudo apt-get update
@@ -26,22 +23,27 @@ sudo apt install -y \
     libtool \
     gcc \
     g++
+
+# 假设当前工作目录已经是 sv-sampler-lab 的根目录
 git submodule update --init --recursive
 
 echo "Compiling Yosys..."
-# 使用 SCRIPT_DIR 变量来构建相对路径
-cd "$SCRIPT_DIR"/yosys/
+# 相对路径 cd
+cd ./yosys/
 make -j$(nproc)
 
-# 使用 SCRIPT_DIR 变量来构建相对路径
-cd "$SCRIPT_DIR"/cudd
+# 返回上一级目录 (sv-sampler-lab 根目录)
+cd ../
+
+# 相对路径 cd
+cd ./cudd
 autoreconf -fvi
 ./configure
 make -j$(nproc)
 sudo make install
 
-# 使用 SCRIPT_DIR 变量来构建相对路径
-cd "$SCRIPT_DIR"/
+# 返回上一级目录 (sv-sampler-lab 根目录)
+cd ../
 
 rm -rf build/
 mkdir -p ./build

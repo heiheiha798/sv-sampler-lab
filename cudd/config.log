@@ -27,8 +27,10 @@ uname -v = #148-Ubuntu SMP Fri Mar 14 19:05:48 UTC 2025
 /usr/bin/oslevel       = unknown
 /bin/universe          = unknown
 
+PATH: /root/cryptominisat5-linux-amd64/
 PATH: /root/SCIPOptSuite-8.0.3-Linux/bin/
 PATH: /root/.vscode-server/cli/servers/Stable-ddc367ed5c8936efe395cffeec279b04ffd7db78/server/bin/remote-cli/
+PATH: /root/cryptominisat5-linux-amd64/
 PATH: /root/SCIPOptSuite-8.0.3-Linux/bin/
 PATH: /usr/local/sbin/
 PATH: /usr/local/bin/
@@ -610,8 +612,8 @@ conftest.c:27:6: warning: conflicting types for built-in function 'pow'; expecte
       |      ^~~
 conftest.c:1:1: note: 'pow' is declared in header '<math.h>'
     1 | /* confdefs.h */
-/usr/bin/ld: /tmp/ccl7gPwY.o: in function `main':
-/root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `pow'
+/usr/bin/ld: /tmp/cco2VlhL.o: in function `main':
+/root/hw/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `pow'
 collect2: error: ld returned 1 exit status
 configure:18014: $? = 1
 configure: failed program was:
@@ -663,8 +665,8 @@ configure:18066: $? = 0
 configure:18076: result: yes
 configure:18094: checking for library containing WSAStartup
 configure:18124: gcc -o conftest -Wall -Wextra -g -O3   conftest.c -lm  >&5
-/usr/bin/ld: /tmp/ccmqkFMl.o: in function `main':
-/root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `WSAStartup'
+/usr/bin/ld: /tmp/ccxCRvBr.o: in function `main':
+/root/hw/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `WSAStartup'
 collect2: error: ld returned 1 exit status
 configure:18124: $? = 1
 configure: failed program was:
@@ -744,8 +746,8 @@ configure: failed program was:
 configure:18144: result: no
 configure:18153: checking for library containing GetProcessMemoryInfo
 configure:18183: gcc -o conftest -Wall -Wextra -g -O3   conftest.c -lm  >&5
-/usr/bin/ld: /tmp/ccsjqX3T.o: in function `main':
-/root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `GetProcessMemoryInfo'
+/usr/bin/ld: /tmp/cceQfr5c.o: in function `main':
+/root/hw/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `GetProcessMemoryInfo'
 collect2: error: ld returned 1 exit status
 configure:18183: $? = 1
 configure: failed program was:
@@ -1493,7 +1495,7 @@ mingw_cv_win32_host=no
 ## Output variables. ##
 ## ----------------- ##
 
-ACLOCAL='${SHELL} '\''/root/sv-sampler-lab/cudd/build-aux/missing'\'' aclocal-1.16'
+ACLOCAL='${SHELL} '\''/root/hw/sv-sampler-lab/cudd/build-aux/missing'\'' aclocal-1.16'
 AMDEPBACKSLASH='\'
 AMDEP_FALSE='#'
 AMDEP_TRUE=''
@@ -1504,9 +1506,9 @@ AM_DEFAULT_VERBOSITY='1'
 AM_V='$(V)'
 AR='ar'
 AS='as'
-AUTOCONF='${SHELL} '\''/root/sv-sampler-lab/cudd/build-aux/missing'\'' autoconf'
-AUTOHEADER='${SHELL} '\''/root/sv-sampler-lab/cudd/build-aux/missing'\'' autoheader'
-AUTOMAKE='${SHELL} '\''/root/sv-sampler-lab/cudd/build-aux/missing'\'' automake-1.16'
+AUTOCONF='${SHELL} '\''/root/hw/sv-sampler-lab/cudd/build-aux/missing'\'' autoconf'
+AUTOHEADER='${SHELL} '\''/root/hw/sv-sampler-lab/cudd/build-aux/missing'\'' autoheader'
+AUTOMAKE='${SHELL} '\''/root/hw/sv-sampler-lab/cudd/build-aux/missing'\'' automake-1.16'
 AWK='gawk'
 CC='gcc'
 CCDEPMODE='depmode=gcc3'
@@ -1557,7 +1559,7 @@ LN_S='ln -s'
 LTLIBOBJS=''
 LT_SYS_LIBRARY_PATH=''
 MAKEINDEX=''
-MAKEINFO='${SHELL} '\''/root/sv-sampler-lab/cudd/build-aux/missing'\'' makeinfo'
+MAKEINFO='${SHELL} '\''/root/hw/sv-sampler-lab/cudd/build-aux/missing'\'' makeinfo'
 MANIFEST_TOOL=':'
 MINGW64_FALSE=''
 MINGW64_TRUE='#'
@@ -1621,7 +1623,7 @@ host_vendor='pc'
 htmldir='${docdir}'
 includedir='${prefix}/include'
 infodir='${datarootdir}/info'
-install_sh='${SHELL} /root/sv-sampler-lab/cudd/build-aux/install-sh'
+install_sh='${SHELL} /root/hw/sv-sampler-lab/cudd/build-aux/install-sh'
 libdir='${exec_prefix}/lib'
 libexecdir='${exec_prefix}/libexec'
 localedir='${datarootdir}/locale'
