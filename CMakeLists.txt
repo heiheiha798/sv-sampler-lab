@@ -11,35 +11,26 @@ set(JSON_BuildTests OFF CACHE INTERNAL "Disable building nlohmann_json tests")
 add_subdirectory(json)
 
 # ---------- 处理 CUDD 库 ----------
-# 直接将本地的 cudd 目录作为子目录添加，而不是通过 find_package 查找系统安装的 CUDD
-# 这假设 cudd/ 目录包含 CUDD 库的源代码和 CMakeLists.txt 或 configure 脚本
-# 如果 cudd/ 目录没有 CMakeLists.txt，你需要根据其构建方式来添加（例如，如果它只提供 .h 和 .a 文件，则需要手动添加库）
-# 鉴于你的 build.sh 脚本会进入 cudd/ 目录进行 autoreconf, configure, make install
-# 这表明 cudd 是一个独立的构建项目，我们不应该在这里 add_subdirectory。
-# 相反，我们应该链接到 build.sh 编译并安装到 /usr/local 的 CUDD 库。
-# 所以，我们保留 CUDD 的 find 逻辑，但优化搜索路径。
-
-# 移除 find_package 的所有逻辑，直接查找本地安装的 CUDD 库
-# 因为 build.sh 已经 sudo make install 到 /usr/local
-message(STATUS "Looking for CUDD library installed by build.sh...")
+# build.sh 会通过 CMAKE_PREFIX_PATH 将 ./_install 目录告知 CMake
+# find_package 会自动在该路径下查找
+# CUDD 库在 make install 后会生成一个 cudd.pc 文件，pkg-config 可以使用它
+# 或者 CMake 的 find 模块能找到头文件和库文件。
+message(STATUS "Looking for CUDD library via CMAKE_PREFIX_PATH...")
 
 find_path(CUDD_INCLUDE_DIR cudd.h
-          HINTS /usr/local /usr
-          PATH_SUFFIXES include include/cudd)
-find_library(CUDD_LIBRARY NAMES cudd.a cudd
-          HINTS /usr/local /usr
-          PATH_SUFFIXES lib lib64)
+          PATH_SUFFIXES include) # 只在 CMAKE_PREFIX_PATH 指定的路径下查找
+
+find_library(CUDD_LIBRARY NAMES cudd
+             PATH_SUFFIXES lib) # 只在 CMAKE_PREFIX_PATH 指定的路径下查找
 
 if(CUDD_INCLUDE_DIR AND CUDD_LIBRARY)
-    # 创建一个 IMPORTED 静态库目标，指向 build.sh 安装的 CUDD 库
-    # 这里使用 STATIC 是因为 cudd.a 是静态库。如果它也可以是动态库，可以根据实际情况调整。
     add_library(CUDD::cudd STATIC IMPORTED)
     set_target_properties(CUDD::cudd PROPERTIES
-                            IMPORTED_LOCATION "${CUDD_LIBRARY}"
-                            INTERFACE_INCLUDE_DIRECTORIES "${CUDD_INCLUDE_DIR}")
-    message(STATUS "Found CUDD installed by build.sh: ${CUDD_LIBRARY} (include: ${CUDD_INCLUDE_DIR})")
+        IMPORTED_LOCATION "${CUDD_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${CUDD_INCLUDE_DIR}")
+    message(STATUS "Found CUDD in local prefix: ${CUDD_LIBRARY}")
 else()
-    message(FATAL_ERROR "CUDD library or headers not found after build.sh installation. Please ensure CUDD is correctly installed by build.sh into /usr/local.")
+    message(FATAL_ERROR "CUDD library not found. Ensure build.sh ran correctly and installed CUDD into the project's _install directory.")
 endif()
 
 

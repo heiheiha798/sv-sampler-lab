@@ -1,28 +1,9 @@
 #!/bin/bash
 set -e
 
-apt install sudo
-sudo apt update
-sudo apt-get update
-sudo apt-get -y install python3 bc python-is-python3
-sudo apt install -y \
-    git \
-    build-essential \
-    libstdc++-12-dev \
-    libc++-dev \
-    pkg-config \
-    tcl tcl-dev \
-    clang \
-    flex bison \
-    libreadline-dev \
-    libgcc-11-dev \
-    gfortran \
-    gawk \
-    automake \
-    autoconf \
-    libtool \
-    gcc \
-    g++
+PROJECT_ROOT=$(pwd) # 获取项目根目录的绝对路径
+INSTALL_PREFIX_ABS="${PROJECT_ROOT}/_install" # 构建绝对安装路径
+mkdir -p "$INSTALL_PREFIX_ABS"
 
 # 假设当前工作目录已经是 sv-sampler-lab 的根目录
 git submodule update --init --recursive
@@ -38,9 +19,9 @@ cd ../
 # 相对路径 cd
 cd ./cudd
 autoreconf -fvi
-./configure
+./configure --prefix="$INSTALL_PREFIX_ABS"
 make -j$(nproc)
-sudo make install
+make install
 
 # 返回上一级目录 (sv-sampler-lab 根目录)
 cd ../
@@ -48,7 +29,8 @@ cd ../
 rm -rf build/
 mkdir -p ./build
 cd ./build
-cmake ..
+# cmake -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX_ABS" ..
+cmake -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX_ABS" ..
 make -j$(nproc)
 
 echo "Build process completed successfully! Please try run.sh"
