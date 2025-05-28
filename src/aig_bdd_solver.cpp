@@ -501,6 +501,10 @@ int aig_to_bdd_solver(const string &aig_file_path,
     manager = initialize_cudd_manager();
     if (!manager)
         return 1;
+
+    literal_to_bdd_map[0] = Cudd_ReadLogicZero(manager);
+    literal_to_bdd_map[1] = Cudd_ReadOne(manager);
+
     std::ifstream aig_file_stream(aig_file_path);
     if (!aig_file_stream.is_open()) {
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);

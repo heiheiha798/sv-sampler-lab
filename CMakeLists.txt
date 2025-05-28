@@ -45,7 +45,7 @@ endif()
 
 
 # ---------- 构建 MySolver ----------
-add_executable(MySolver src/main.cpp src/json_v_converter.cpp src/aig_bdd_solver.cpp)
+add_executable(MySolver src/main.cpp src/json_v_converter.cpp src/aig_bdd_solver.cpp src/results_merger.cpp)
 
 # 链接 MySolver 需要的库
 # nlohmann_json::nlohmann_json 是由 add_subdirectory(json) 创建的目标

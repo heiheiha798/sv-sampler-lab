@@ -15,4 +15,9 @@ int aig_to_bdd_solver(const std::string &aig_file_path,
 int json_v_converter(const std::string &input_json_path,
                      const std::string &output_v_dir);
 
+int merge_bdd_results(const std::string &manifest_path_str, 
+                      const std::string &final_output_json_path_str, 
+                      int total_samples_required,
+                      unsigned int random_seed);
+
 #endif

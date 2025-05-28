@@ -29,8 +29,8 @@ cd ../
 rm -rf build/
 mkdir -p ./build
 cd ./build
-# cmake -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX_ABS" ..
 cmake -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX_ABS" ..
+# cmake -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX_ABS" -DCMAKE_BUILD_TYPE=Debug ..
 make -j$(nproc)
 
 echo "Build process completed successfully! Please try run.sh"

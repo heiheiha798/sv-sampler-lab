@@ -1,0 +1,16 @@
+TAP version 13
+1..7
+not ok 1
+FAIL: dddmp/test_dddmp.test 1
+not ok 2
+FAIL: dddmp/test_dddmp.test 2
+not ok 3
+FAIL: dddmp/test_dddmp.test 3
+not ok 4
+FAIL: dddmp/test_dddmp.test 4
+not ok 5
+FAIL: dddmp/test_dddmp.test 5
+not ok 6
+FAIL: dddmp/test_dddmp.test 6
+not ok 7
+FAIL: dddmp/test_dddmp.test 7
