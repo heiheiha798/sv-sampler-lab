@@ -422,8 +422,10 @@ static json perform_bdd_sampling(
                                 if (it_assign !=
                                     current_assignment_cudd_indices.end())
                                     bit_assignment = it_assign->second;
-                                else
-                                    bit_assignment = 0;
+                                else{
+                                    std::uniform_int_distribution<int> dist_bit(0, 1);
+                                    bit_assignment = dist_bit(rng);
+                                }
                             } else
                                 bit_assignment = 0;
                         }

@@ -150,27 +150,59 @@ int main(int argc, char *argv[])
                 cerr << "Failed to load mapping file: " << mapping_file_path << endl;
                 return 1;
             }
+
             map_contents.num_total_samples_requested = num_total_samples;
 
-            int samples_per_component = 0;
-            if (num_components > 0 && num_total_samples > 0)
-            {
-                samples_per_component = static_cast<int>(ceil(pow(static_cast<double>(num_total_samples), 1.0 / static_cast<double>(num_components))));
-                if (samples_per_component == 0) samples_per_component = 1; // Ensure at least 1 if total > 0
-                samples_per_component += 50; // Your requested safeguard
-            } else if (num_total_samples == 0) { // If 0 samples requested overall
-                samples_per_component = 0;
+            // 新的动态采样策略
+            vector<int> samples_per_component_list(num_components);
+            if (num_total_samples == 0) {
+                // 如果总采样数为0，所有组件都采样0次
+                fill(samples_per_component_list.begin(), samples_per_component_list.end(), 0);
+            } else {
+                // 计算初始的每组件采样数（作为起始值）
+                int base_samples = static_cast<int>(ceil(pow(static_cast<double>(num_total_samples), 1.0 / static_cast<double>(num_components))));
+                if (base_samples == 0) base_samples = 1;
+                
+                // 动态分配策略
+                int remaining_target = num_total_samples;
+                int remaining_components = num_components;
+                
+                for (int i = 0; i < num_components; ++i) {
+                    if (remaining_components == 1) {
+                        // 最后一个组件，采样剩余需要的数量（但至少1个）
+                        samples_per_component_list[i] = max(1, remaining_target);
+                    } else {
+                        // 计算当前组件应该采样的数量
+                        // 策略：尽量多采样，但要为后续组件留一些空间
+                        int max_for_current = min(base_samples + 100, remaining_target / remaining_components * 2);
+                        samples_per_component_list[i] = max(1, max_for_current);
+                        
+                        // 更新剩余目标（假设当前组件能产生所需样本）
+                        remaining_target = max(1, remaining_target / samples_per_component_list[i]);
+                        remaining_components--;
+                    }
+                }
             }
 
-
-            cout << "Requesting " << samples_per_component << " samples per component." << endl;
+            cout << "Dynamic sampling strategy: ";
+            for (int i = 0; i < num_components; ++i) {
+                cout << "Component " << i << ": " << samples_per_component_list[i] << " samples";
+                if (i < num_components - 1) cout << ", ";
+            }
+            cout << endl;
 
             bool any_component_unsat = false;
-            bool break_early_on_unsat = true; // Set to false if you want to process all components even if one is UNSAT
+            bool break_early_on_unsat = true;
+            int component_index = 0;
 
             for (const auto &comp_info : map_contents.components)
             {
                 cout << "Processing component " << comp_info.component_id << " (Verilog: " << comp_info.verilog_file << ")" << endl;
+                
+                // 使用动态计算的采样数
+                int current_samples_needed = samples_per_component_list[component_index];
+                cout << "Requesting " << current_samples_needed << " samples for this component." << endl;
+                
                 path comp_v_file = run_dir_path / comp_info.verilog_file;
                 path comp_aig_file = run_dir_path / (comp_info.aig_file_stub + ".aig");
                 path comp_input_json = run_dir_path / comp_info.input_json_file;
@@ -185,8 +217,8 @@ int main(int argc, char *argv[])
                 unsigned int comp_random_seed = random_seed + comp_info.component_id;
 
                 int bdd_ret = aig_to_bdd_solver(comp_aig_file.string(), comp_input_json.string(),
-                                                samples_per_component, comp_result_json.string(), comp_random_seed);
-                
+                                                current_samples_needed, comp_result_json.string(), comp_random_seed);
+
                 // After BDD solver, check the result file status
                 if (!std::filesystem::exists(comp_result_json)) {
                      cerr << "CRITICAL: BDD solver call completed for component " << comp_info.component_id 

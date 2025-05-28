@@ -22,7 +22,7 @@ using namespace std::filesystem;
 const int JVC_INTERNAL_ERROR = -1;
 const int JVC_UNSAT_PREPROCESSED = -2;
 const int JVC_SUCCESS_SINGLE_FILE = 1;
-static const int SPLIT_COMPONENTS_THRESHOLD = 8; // If num components > this, split. (So 8 or less = single file)
+static const int SPLIT_COMPONENTS_THRESHOLD = 3; // If num components > this, split. (So 8 or less = single file)
 
 
 struct DSUComponentForVerilogOrder // Kept for reference or minor use
