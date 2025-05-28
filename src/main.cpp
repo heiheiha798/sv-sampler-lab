@@ -1,270 +1,274 @@
-// File: main.cpp
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
-#include <fstream>      // For reading manifest
-#include <cstdlib>      // For system()
-#include <chrono>       // For timing
-#include <utility>      // For std::pair
-#include "solver_functions.h" // Now includes SolverDetailedTimings and new aig_to_bdd_solver declaration
-#include "nlohmann/json.hpp" // For parsing manifest
+#include <cstdlib>            // For system()
+#include <cmath>              // For ceil, pow
+#include <fstream>            // For ifstream, ofstream
+#include "solver_functions.h" // Includes JVC_ constants
+#include "nlohmann/json.hpp"  // For quickly writing UNSAT result
 
-using json = nlohmann::json;
 using namespace std;
-namespace fs = std::filesystem;
+using namespace std::filesystem;
+using json = nlohmann::json;
 
-// Forward declarations for functions that will be in this file or linked
-int json_v_converter(const std::string &input_json_path, const std::string &output_v_dir);
-int merge_bdd_results(const string &manifest_path_str, const string &final_output_json_path_str, int total_samples_required, unsigned int random_seed);
+// Helper to call Yosys
+int run_yosys(const string &yosys_executable, const string &verilog_file, const string &aig_file)
+{
+    string yosys_log_file = aig_file + ".yosys.log"; // Create a log file name
+    // Using the robust Yosys script
+    std::string yosys_script = "read_verilog " + verilog_file +
+                             "; hierarchy -check; proc; opt; memory_dff; opt; fsm; opt" +
+                             "; techmap; opt" +
+                             "; abc -g AND; opt" +
+                             "; aigmap" +
+                             "; write_aiger -ascii " + aig_file +
+                             ";";
+    std::string yosys_command = yosys_executable + " -p \"" + yosys_script + "\" > \"" + yosys_log_file + "\" 2>&1";
 
 
-// Helper to create component-specific variable list JSON
-// The order of variables in this list MUST match PIs in AIG (derived from Verilog)
-bool create_component_vars_json(const json& component_pi_info, const fs::path& output_path) {
-    json vars_json;
-    vars_json["variable_list"] = json::array();
+    // std::cout << "Executing Yosys: " << yosys_command << std::endl;
+    // std::cout << "Yosys log will be in: " << yosys_log_file << std::endl;
+    int ret = system(yosys_command.c_str());
 
-    // The component_pi_info is already ordered as it appeared in the Verilog's input list
-    // which Yosys should preserve for AIGER PIs.
-    for (const auto& pi_entry : component_pi_info) {
-        json var_entry;
-        // These names/IDs are for aig_to_bdd_solver's internal JSON representation.
-        // The important part is that `aig_to_bdd_solver` will output values
-        // in this same order. The merger will then use `original_json_id` for mapping.
-        var_entry["name"] = pi_entry["original_name"]; 
-        var_entry["bit_width"] = pi_entry["bit_width"];
-        // Add a reference to original ID if merger needs it directly from component results,
-        // but current merger gets it from manifest.
-        // var_entry["original_json_id"] = pi_entry["original_json_id"]; 
-        vars_json["variable_list"].push_back(var_entry);
+    if (ret != 0)
+    {
+        std::cerr << "Yosys failed with exit code " << ret << " for " << verilog_file << std::endl;
+        std::cerr << "Check Yosys log for details: " << yosys_log_file << std::endl;
+        std::ifstream log_stream(yosys_log_file);
+        if (log_stream.is_open())
+        {
+            std::cerr << "--- Yosys Log Start ---" << std::endl;
+            std::string line;
+            while (getline(log_stream, line))
+            {
+                std::cerr << line << std::endl;
+            }
+            std::cerr << "--- Yosys Log End ---" << std::endl;
+            log_stream.close();
+        }
+        else
+        {
+            std::cerr << "Could not open Yosys log file: " << yosys_log_file << std::endl;
+        }
     }
-
-    ofstream out_stream(output_path);
-    if (!out_stream.is_open()) {
-        cerr << "Error: Failed to create component vars json: " << output_path << endl;
-        return false;
-    }
-    out_stream << vars_json.dump(4) << endl;
-    out_stream.close();
-    return true;
+    return ret;
 }
 
-
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        cerr << "Usage: MySolver <mode> [options...]" << endl;
-        cerr << "Modes:" << endl;
-        cerr << "  json-to-v <input.json> <output_verilog_dir>" << endl;
-        cerr << "  aig-to-bdd <input.aag> <component_vars.json> <num_samples> <output_result.json> <seed>" << endl;
-        cerr << "  merge-results <manifest.json> <final_output.json> <num_samples> <seed>" << endl;
-        cerr << "  solve-decomposed <input_constraint.json> <num_samples> <run_dir> <seed> [yosys_path]" << endl;
-        return 1;
-    }
-
-    string mode = argv[1];
-
-    if (mode == "json-to-v" && argc == 4) {
-        return json_v_converter(argv[2], argv[3]);
-    } else if (mode == "aig-to-bdd" && argc == 7) {
-        std::pair<int, SolverDetailedTimings> result = aig_to_bdd_solver(argv[2], argv[3], stoi(argv[4]), argv[5], stoul(argv[6]));
-        return result.first; // Return only the status code
-    } else if (mode == "merge-results" && argc == 6) {
-        return merge_bdd_results(argv[2], argv[3], stoi(argv[4]), stoul(argv[5]));
-    } else if (mode == "solve-decomposed" && (argc == 6 || argc == 7)) {
-        string constraint_json_path = argv[2];
-        int num_samples = stoi(argv[3]);
-        string run_dir_str = argv[4];
-        unsigned int random_seed = stoul(argv[5]);
-        string yosys_executable = (argc == 7) ? argv[6] : "yosys"; // Default to "yosys" if not provided
-
-        auto pipeline_start_time = std::chrono::high_resolution_clock::now();
-
-        fs::path run_dir(run_dir_str);
-        fs::create_directories(run_dir); // Ensure run_dir exists
-
-        // 1. Convert main JSON to component Verilog files and manifest.json
-        cout << "Step 1: Converting JSON to component Verilog files..." << endl;
-        auto step1_start_time = std::chrono::high_resolution_clock::now();
-        int conv_ret = json_v_converter(constraint_json_path, run_dir_str);
-        auto step1_end_time = std::chrono::high_resolution_clock::now();
-        auto step1_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step1_end_time - step1_start_time);
-        cout << "Step 1 (json_v_converter) took: " << step1_duration.count() << " ms." << endl;
-
-        if (conv_ret == 1) { // General error
-            cerr << "Error in json_v_converter." << endl;
+int main(int argc, char *argv[])
+{
+    if (argc == 4 && string(argv[1]) == "json-to-v")
+    {
+        string input_json_path_str = argv[2];
+        string output_v_dir_str = argv[3];
+        std::string base_name;
+        int status;
+        int jvc_ret = json_v_converter(input_json_path_str, output_v_dir_str, base_name, &status);
+        if (jvc_ret != 0 || (status != JVC_SUCCESS_SINGLE_FILE && status != JVC_UNSAT_PREPROCESSED))
+        {
+            cerr << "json-to-v mode encountered an issue with json_v_converter new logic or an error." << endl;
             return 1;
         }
-        
-        fs::path manifest_path = run_dir / "manifest.json";
-        ifstream manifest_stream(manifest_path);
-        if (!manifest_stream.is_open()) {
-            cerr << "Error: manifest.json not found after json_v_converter call in " << run_dir_str << endl;
-            return 1;
-        }
-        json manifest_data;
-        manifest_stream >> manifest_data;
-        manifest_stream.close();
-
-        if (conv_ret == 2 || manifest_data.value("unsat_by_preprocessing", false)) {
-             cout << "Problem determined to be UNSAT by json_v_converter. Skipping BDD steps." << endl;
-             // Merger will handle this based on manifest flag
-        } else {
-            // 2. For each component: Verilog -> AIG -> BDD solve
-            json components_array = manifest_data.value("components", json::array());
-            cout << "Step 2: Processing " << components_array.size() << " components..." << endl;
-            auto step2_start_time = std::chrono::high_resolution_clock::now();
-            long long total_yosys_time_ms = 0;
-            long long total_aig_parsing_solver_ms = 0;
-            long long total_bdd_construction_solver_ms = 0;
-            long long total_sampling_solver_ms = 0;
-
-            for (const auto& comp_entry : components_array) {
-                string comp_v_file_name = comp_entry["verilog_file"].get<string>();
-                string comp_aig_file_name = comp_entry["aig_file"].get<string>(); // e.g., component_0.aag
-                string comp_result_json_name = comp_entry["result_json_file"].get<string>();
-                int comp_id = comp_entry["id"].get<int>();
-
-                fs::path comp_v_path = run_dir / comp_v_file_name;
-                fs::path comp_aig_path = run_dir / comp_aig_file_name;
-                fs::path comp_result_path = run_dir / comp_result_json_name;
-                fs::path temp_comp_vars_json_path = run_dir / ("temp_vars_component_" + to_string(comp_id) + ".json");
-
-                cout << "  Processing component " << comp_id << ": " << comp_v_file_name << endl;
-
-                if (comp_entry.value("is_trivial_sat", false) || comp_entry.value("is_trivial_unsat", false)) {
-                    cout << "    Component " << comp_id << " is trivial. Skipping Yosys and BDD solver." << endl;
-                    // If UNSAT, merger will catch it. If SAT, merger knows it has no specific variable samples.
-                    // Create an empty assignment list file for trivial sat if merger expects one
-                    if (comp_entry.value("is_trivial_sat", false)) {
-                        json trivial_sat_result;
-                        trivial_sat_result["assignment_list"] = json::array(); // Empty, as no specific assignment needed from solver
-                        ofstream ts_out(comp_result_path);
-                        ts_out << trivial_sat_result.dump(4) << endl;
-                        ts_out.close();
-                    }
-                    continue;
-                }
-
-                // 2a. Verilog to AIG (using Yosys)
-                cout << "    Converting " << comp_v_path.filename() << " to AIG..." << endl;
-                auto yosys_call_start_time = std::chrono::high_resolution_clock::now();
-                string yosys_script = "read_verilog " + comp_v_path.string() +
-                                      "; synth -top " + comp_entry["verilog_file"].get<string>().substr(0, comp_entry["verilog_file"].get<string>().find_last_of('.')) +
-                                      "; abc; aigmap; opt; clean; write_aiger -ascii " + comp_aig_path.string() + ";";
-                string yosys_command = yosys_executable + " -q -p \"" + yosys_script + "\"";
-                int yosys_ret = system(yosys_command.c_str());
-                auto yosys_call_end_time = std::chrono::high_resolution_clock::now();
-                auto yosys_call_duration = std::chrono::duration_cast<std::chrono::milliseconds>(yosys_call_end_time - yosys_call_start_time);
-                total_yosys_time_ms += yosys_call_duration.count();
-
-                if (yosys_ret != 0) {
-                    cerr << "Error: Yosys conversion failed for " << comp_v_path << endl;
-                    continue; // Skip to next component
-                }
-
-                // 2b. Create temporary JSON for component's variables for aig_to_bdd_solver
-                if (!create_component_vars_json(comp_entry["primary_inputs"], temp_comp_vars_json_path)) {
-                    cerr << "Error: Failed to create temp vars JSON for component " << comp_id << endl;
-                    continue; // Skip to next component
-                }
-
-                // 2c. AIG to BDD solve
-                cout << "    Solving AIG for component " << comp_id << "..." << endl;
-                int samples_for_this_component;
-                
-                // Calculate samples based on N^(1/k) + 100 strategy
-                // Only exclude trivial_unsat components from k calculation
-                int effective_components_for_sampling = 0;
-                
-                // Count components that can contribute to sampling (exclude only trivial_unsat)
-                for (const auto& comp : components_array) {
-                    if (!comp.value("is_trivial_unsat", false)) {
-                        effective_components_for_sampling++;
-                    }
-                }
-                
-                if (num_samples == 0) {
-                    samples_for_this_component = 0;
-                } else { // num_samples > 0
-                    if (effective_components_for_sampling == 0) {
-                        // This implies all components were trivial_unsat.
-                        // Current comp_entry should also be trivial_unsat if this is the case.
-                        // If by some logic error comp_entry is not trivial_unsat, treat it as the only one.
-                        samples_for_this_component = comp_entry.value("is_trivial_unsat", false) ? 0 : num_samples;
-                    } else if (effective_components_for_sampling == 1) {
-                        // If there's only one non-trivial_unsat component overall (which must be this one if we are solving it),
-                        // it gets all num_samples without the +50.
-                        samples_for_this_component = num_samples;
-                    } else { // effective_components_for_sampling > 1
-                        double base_samples = std::pow(static_cast<double>(num_samples), 1.0 / static_cast<double>(effective_components_for_sampling));
-                        samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 50;
-                    }
-
-                    // Ensure minimum samples for num_samples > 0, if calculated samples are too low
-                    if (samples_for_this_component < 1) {
-                        samples_for_this_component = 1;
-                    }
-                }
-                
-                std::pair<int, SolverDetailedTimings> solver_result = aig_to_bdd_solver(
-                                                                        comp_aig_path.string(), 
-                                                                        temp_comp_vars_json_path.string(), 
-                                                                        samples_for_this_component, 
-                                                                        comp_result_path.string(), 
-                                                                        random_seed + comp_id);
-                int bdd_ret = solver_result.first;
-                const SolverDetailedTimings& comp_timings = solver_result.second;
-
-                total_aig_parsing_solver_ms += comp_timings.aig_parsing_ms;
-                total_bdd_construction_solver_ms += comp_timings.bdd_construction_ms;
-                total_sampling_solver_ms += comp_timings.sampling_ms;
-                                
-                if (bdd_ret != 0) {
-                    cerr << "Warning: aig_to_bdd_solver failed for component " << comp_id 
-                         << ". Result file might be empty or indicate no solution." << endl;
-                    // Merger will check if component_X_results.json is empty
-                }
-                 fs::remove(temp_comp_vars_json_path); // Clean up temp file
-            }
-            auto step2_end_time = std::chrono::high_resolution_clock::now();
-            auto step2_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step2_end_time - step2_start_time);
-            cout << "Step 2 (Component Processing Loop) took: " << step2_duration.count() << " ms." << endl;
-            cout << "  Total Yosys (Verilog to AIG) time: " << total_yosys_time_ms << " ms." << endl;
-            cout << "  Total AIG parsing (in solver) time: " << total_aig_parsing_solver_ms << " ms." << endl;
-            cout << "  Total BDD construction (in solver) time: " << total_bdd_construction_solver_ms << " ms." << endl;
-            cout << "  Total BDD sampling (in solver) time: " << total_sampling_solver_ms << " ms." << endl;
-        }
-
-        // 3. Merge results
-        cout << "Step 3: Merging component results..." << endl;
-        auto step3_start_time = std::chrono::high_resolution_clock::now();
-        fs::path final_result_json_path = run_dir / "result.json";
-        int merge_ret = merge_bdd_results(manifest_path.string(), final_result_json_path.string(), num_samples, random_seed);
-        auto step3_end_time = std::chrono::high_resolution_clock::now();
-        auto step3_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step3_end_time - step3_start_time);
-        cout << "Step 3 (merge_bdd_results) took: " << step3_duration.count() << " ms." << endl;
-
-        if (merge_ret != 0) {
-            cerr << "Error in results_merger." << endl;
-            return 1;
-        }
-        
-        auto pipeline_end_time = std::chrono::high_resolution_clock::now();
-        auto pipeline_duration = std::chrono::duration_cast<std::chrono::milliseconds>(pipeline_end_time - pipeline_start_time);
-        cout << "Solve-decomposed finished. Final results in " << final_result_json_path << endl;
-        cout << "Total pipeline time for solve-decomposed: " << pipeline_duration.count() << " ms." << endl;
         return 0;
+    }
+    else if (argc == 7 && string(argv[1]) == "aig-to-bdd")
+    {
+        string aig_file_path = argv[2];
+        string original_json_path = argv[3];
+        int num_samples = stoi(argv[4]);
+        string result_json_path = argv[5];
+        unsigned int random_seed = stoul(argv[6]);
+        return aig_to_bdd_solver(aig_file_path, original_json_path, num_samples,
+                                 result_json_path, random_seed);
+    }
+    else if (argc == 7 && string(argv[1]) == "solve-decomposed")
+    {
+        string constraint_json_abs_str = argv[2];
+        int num_total_samples = stoi(argv[3]);
+        string run_dir_abs_str = argv[4];
+        unsigned int random_seed = stoul(argv[5]);
+        string yosys_executable = argv[6];
 
-    } else {
-        cerr << "Invalid mode or incorrect number of arguments for mode '" << mode << "'." << endl;
-        // Print usage again
-        cerr << "Usage: MySolver <mode> [options...]" << endl;
-        cerr << "Modes:" << endl;
-        cerr << "  json-to-v <input.json> <output_verilog_dir>" << endl;
-        cerr << "  aig-to-bdd <input.aag> <component_vars.json> <num_samples> <output_result.json> <seed>" << endl;
-        cerr << "  merge-results <manifest.json> <final_output.json> <num_samples> <seed>" << endl;
-        cerr << "  solve-decomposed <input_constraint.json> <num_samples> <run_dir> <seed> [yosys_path]" << endl;
+        std::string base_name_no_ext;
+        int jvc_status_or_num_comp;
+
+        int jvc_ret = json_v_converter(constraint_json_abs_str, run_dir_abs_str,
+                                       base_name_no_ext, &jvc_status_or_num_comp);
+
+        if (jvc_ret != 0)
+        {
+            cerr << "json_v_converter failed with file/parse error." << endl;
+            return 1;
+        }
+
+        std::filesystem::path run_dir_path(run_dir_abs_str);
+        std::filesystem::path final_result_json_path = run_dir_path / "result.json";
+
+        if (jvc_status_or_num_comp == JVC_UNSAT_PREPROCESSED)
+        {
+            cout << "Pipeline determined the problem is UNSAT during json_v_converter preprocessing." << endl;
+            json unsat_json_output;
+            unsat_json_output["assignment_list"] = json::array();
+            ofstream ofs(final_result_json_path.string());
+            if (!ofs.is_open())
+            {
+                cerr << "Failed to write UNSAT result.json" << endl;
+                return 1;
+            }
+            ofs << unsat_json_output.dump(4) << endl;
+            ofs.close();
+            return 2; // Special exit code for preprocessor UNSAT
+        }
+        else if (jvc_status_or_num_comp == JVC_INTERNAL_ERROR)
+        {
+            cerr << "json_v_converter failed with internal error." << endl;
+            return 1;
+        }
+        else if (jvc_status_or_num_comp == JVC_SUCCESS_SINGLE_FILE)
+        {
+            cout << "json_v_converter produced a single Verilog file." << endl;
+            path verilog_file = run_dir_path / (base_name_no_ext + ".v");
+            path aig_file = run_dir_path / (base_name_no_ext + ".aig");
+
+            if (run_yosys(yosys_executable, verilog_file.string(), aig_file.string()) != 0)
+            {
+                return 1;
+            }
+            // For single file, aig_to_bdd_solver writes directly to final_result_json_path
+            return aig_to_bdd_solver(aig_file.string(), constraint_json_abs_str, num_total_samples,
+                                     final_result_json_path.string(), random_seed);
+        }
+        else
+        { // jvc_status_or_num_comp = k > 1 (split)
+            int num_components = jvc_status_or_num_comp;
+            cout << "json_v_converter produced " << num_components << " component Verilog files." << endl;
+
+            path mapping_file_path = run_dir_path / (base_name_no_ext + ".mapping.json");
+            MappingFileContents map_contents;
+            if (!load_mapping_file(mapping_file_path.string(), map_contents))
+            {
+                cerr << "Failed to load mapping file: " << mapping_file_path << endl;
+                return 1;
+            }
+            map_contents.num_total_samples_requested = num_total_samples;
+
+            int samples_per_component = 0;
+            if (num_components > 0 && num_total_samples > 0)
+            {
+                samples_per_component = static_cast<int>(ceil(pow(static_cast<double>(num_total_samples), 1.0 / static_cast<double>(num_components))));
+                if (samples_per_component == 0) samples_per_component = 1; // Ensure at least 1 if total > 0
+                samples_per_component += 50; // Your requested safeguard
+            } else if (num_total_samples == 0) { // If 0 samples requested overall
+                samples_per_component = 0;
+            }
+
+
+            cout << "Requesting " << samples_per_component << " samples per component." << endl;
+
+            bool any_component_unsat = false;
+            bool break_early_on_unsat = true; // Set to false if you want to process all components even if one is UNSAT
+
+            for (const auto &comp_info : map_contents.components)
+            {
+                cout << "Processing component " << comp_info.component_id << " (Verilog: " << comp_info.verilog_file << ")" << endl;
+                path comp_v_file = run_dir_path / comp_info.verilog_file;
+                path comp_aig_file = run_dir_path / (comp_info.aig_file_stub + ".aig");
+                path comp_input_json = run_dir_path / comp_info.input_json_file;
+                path comp_result_json = run_dir_path / (comp_info.aig_file_stub + "_result.json");
+
+                if (run_yosys(yosys_executable, comp_v_file.string(), comp_aig_file.string()) != 0)
+                {
+                    cerr << "Yosys failed for component " << comp_info.component_id << ". Aborting." << endl;
+                    return 1;
+                }
+
+                unsigned int comp_random_seed = random_seed + comp_info.component_id;
+
+                int bdd_ret = aig_to_bdd_solver(comp_aig_file.string(), comp_input_json.string(),
+                                                samples_per_component, comp_result_json.string(), comp_random_seed);
+                
+                // After BDD solver, check the result file status
+                if (!std::filesystem::exists(comp_result_json)) {
+                     cerr << "CRITICAL: BDD solver call completed for component " << comp_info.component_id 
+                          << " (returned " << bdd_ret << ") but result file NOT CREATED: " 
+                          << comp_result_json.string() << ". Aborting." << endl;
+                     return 1; 
+                }
+
+                bool current_component_is_unsat = false;
+                ifstream comp_res_ifs(comp_result_json.string());
+                if (comp_res_ifs.is_open()) {
+                    json comp_res_data;
+                    try { 
+                        comp_res_ifs >> comp_res_data; 
+                        if (comp_res_data.contains("assignment_list") && 
+                            comp_res_data["assignment_list"].is_array() && 
+                            comp_res_data["assignment_list"].empty()) {
+                            current_component_is_unsat = true;
+                        }
+                    } catch (const json::parse_error& e) {
+                        cerr << "Warning: Could not parse result file for component " << comp_info.component_id 
+                             << ": " << comp_result_json.string() << " (" << e.what() << "). Assuming not UNSAT for now." << endl;
+                        // Decide how to handle parse error - treat as error or non-UNSAT?
+                        // For now, let's not assume it's UNSAT if we can't parse it.
+                    }
+                    comp_res_ifs.close();
+                } else {
+                     // This case should ideally be caught by the exists() check above, but as a safeguard:
+                     cerr << "CRITICAL: Could not open result file for component " << comp_info.component_id 
+                          << " after BDD solver: " << comp_result_json.string() << ". Aborting." << endl;
+                     return 1;
+                }
+
+                if (current_component_is_unsat) {
+                    cout << "Component " << comp_info.component_id << " was UNSAT." << endl;
+                    any_component_unsat = true;
+                    if (break_early_on_unsat) {
+                        break; 
+                    }
+                } else if (bdd_ret != 0) {
+                    // BDD solver returned an error, AND the component was not determined to be UNSAT by an empty list
+                    cerr << "aig_to_bdd_solver FAILED for component " << comp_info.component_id 
+                         << " with code " << bdd_ret << " (and not clearly UNSAT). Aborting." << endl;
+                    return 1; 
+                }
+                cout << "Component " << comp_info.component_id << " processed." << endl;
+            } // End of for loop processing components
+
+            if (any_component_unsat)
+            {
+                cout << "Overall problem is UNSAT due to one or more UNSAT components." << endl;
+                json unsat_json_output;
+                unsat_json_output["assignment_list"] = json::array();
+                ofstream ofs(final_result_json_path.string());
+                if (!ofs.is_open())
+                {
+                    cerr << "Failed to write final UNSAT result.json" << endl;
+                    return 1;
+                }
+                ofs << unsat_json_output.dump(4) << endl;
+                ofs.close();
+                return 0; // Successfully determined UNSAT
+            }
+            else
+            {
+                cout << "All processed components are individually SAT (or not processed due to early UNSAT break). Merging results..." << endl;
+                int merge_ret = merge_results(mapping_file_path.string(), run_dir_abs_str,
+                                              num_total_samples, final_result_json_path.string(), random_seed);
+                if (merge_ret != 0) {
+                    cerr << "Error during results merging." << endl;
+                    return 1;
+                }
+                return 0; // Successfully merged
+            }
+        }
+    }
+    else
+    {
+        cout << "Usage: " << endl;
+        cout << "  " << argv[0] << " json-to-v <input_json_path> <output_v_dir>" << endl;
+        cout << "  " << argv[0] << " aig-to-bdd <aig_file_path> <original_json_path> <num_samples> <result_json_path> <random_seed>" << endl;
+        cout << "  " << argv[0] << " solve-decomposed <constraint_json_path> <num_samples> <run_output_dir> <random_seed> <yosys_executable_path>" << endl;
         return 1;
     }
     return 0;

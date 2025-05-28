@@ -1,349 +1,252 @@
-#include "solver_functions.h" // For to_hex_string, and potentially json type
+#include "solver_functions.h"
 #include "nlohmann/json.hpp"
-#include <iostream>
 #include <fstream>
+#include <iostream>
 #include <vector>
 #include <string>
-#include <set>
 #include <map>
-#include <random>
-#include <climits>
-#include <algorithm> // For std::shuffle if needed
-#include <filesystem> // For path manipulation
+#include <set>
+#include <algorithm>
+#include <random> // For random selection if needed, or shuffling indices
+#include <cmath>  // For ceil in sample count calculation (though samples_per_component is decided by main)
+#include <filesystem> // For path operations
 
 using json = nlohmann::json;
 using namespace std;
-namespace fs = std::filesystem;
 
-// (Optional, if to_hex_string is not in solver_functions.h or needs specific include)
-// string to_hex_string(unsigned long long value, int bit_width); 
 
-// This mt19937 can be seeded from main if deterministic merging is needed for testing
-static std::mt19937 merge_rng(std::random_device{}()); 
-
-int merge_bdd_results(const string &manifest_path_str, 
-                      const string &final_output_json_path_str, 
-                      int total_samples_required,
-                      unsigned int random_seed) {
-    merge_rng.seed(random_seed);
-    fs::path manifest_fs_path(manifest_path_str);
-    fs::path manifest_dir = manifest_fs_path.parent_path();
-
-    json manifest_data;
-    ifstream manifest_stream(manifest_fs_path);
-    if (!manifest_stream.is_open()) {
-        cerr << "Error: [Merger] Cannot open manifest file: " << manifest_path_str << endl;
-        return 1;
+bool load_mapping_file(const std::string& mapping_json_path, MappingFileContents& contents) {
+    std::ifstream ifs(mapping_json_path);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: Cannot open mapping file: " << mapping_json_path << std::endl;
+        return false;
     }
+    json mapping_data;
     try {
-        manifest_stream >> manifest_data;
+        ifs >> mapping_data;
     } catch (const json::parse_error& e) {
-        cerr << "Error: [Merger] Parsing manifest JSON failed: " << e.what() << endl;
-        manifest_stream.close();
-        return 1;
+        std::cerr << "Error: Cannot parse mapping file: " << mapping_json_path << " (" << e.what() << ")" << std::endl;
+        ifs.close();
+        return false;
     }
-    manifest_stream.close();
+    ifs.close();
 
-    if (manifest_data.value("unsat_by_preprocessing", false)) {
-        cout << "Info: [Merger] Problem was marked UNSAT by preprocessing. Generating empty result." << endl;
-        json empty_result;
-        empty_result["assignment_list"] = json::array();
-        empty_result["notes"] = "Problem determined UNSAT during preprocessing by json_v_converter.";
-        
-        ofstream final_out_stream(final_output_json_path_str);
-        if (!final_out_stream.is_open()) {
-            cerr << "Error: [Merger] Cannot write final empty result JSON: " << final_output_json_path_str << endl;
+    if (!mapping_data.contains("original_variable_list") || !mapping_data.contains("components")) {
+        std::cerr << "Error: Mapping file missing required fields." << std::endl;
+        return false;
+    }
+    contents.original_variable_list_json = mapping_data["original_variable_list"];
+    // contents.num_total_samples_requested = mapping_data.value("num_total_samples_requested", 0); // If stored here
+
+    for (const auto& comp_json : mapping_data["components"]) {
+        ComponentMappingInfo info;
+        info.component_id = comp_json.value("component_id", -1);
+        info.verilog_file = comp_json.value("verilog_file", "");
+        info.input_json_file = comp_json.value("input_json_file", "");
+        info.aig_file_stub = comp_json.value("aig_file_stub", "");
+        if (comp_json.contains("variable_names") && comp_json["variable_names"].is_array()) {
+            for (const auto& name_json : comp_json["variable_names"]) {
+                info.variable_names.push_back(name_json.get<std::string>());
+            }
+        }
+        if (info.component_id == -1 || info.aig_file_stub.empty()) {
+             std::cerr << "Error: Invalid component entry in mapping file." << std::endl;
+             return false;
+        }
+        contents.components.push_back(info);
+    }
+    // Sort components by ID to ensure consistent processing order
+    std::sort(contents.components.begin(), contents.components.end(), 
+        [](const ComponentMappingInfo& a, const ComponentMappingInfo& b){
+            return a.component_id < b.component_id;
+        });
+    return true;
+}
+
+
+int merge_results(const std::string& mapping_json_path,
+                  const std::string& run_dir, 
+                  int total_samples_to_generate,
+                  const std::string& final_output_json_path,
+                  unsigned int random_seed_for_merging)
+{
+    MappingFileContents mapping_info;
+    if (!load_mapping_file(mapping_json_path, mapping_info)) {
+        return 1; // Error loading/parsing mapping file
+    }
+
+    std::vector<json> component_assignment_lists; // Each element is an assignment_list (array of samples) for a component
+    std::vector<size_t> num_samples_per_component;
+
+    for (const auto& comp_map_entry : mapping_info.components) {
+        std::filesystem::path comp_result_path = std::filesystem::path(run_dir) / (comp_map_entry.aig_file_stub + "_result.json");
+        std::ifstream comp_result_ifs(comp_result_path);
+        if (!comp_result_ifs.is_open()) {
+            std::cerr << "Error: Cannot open component result file: " << comp_result_path << std::endl;
+            // This implies overall UNSAT or an error in the pipeline before merger
+            // For now, assume UNSAT and write empty list.
+            json final_result_json;
+            final_result_json["assignment_list"] = json::array();
+            std::ofstream ofs(final_output_json_path);
+            if (!ofs.is_open()) return 1; // Cannot write final result
+            ofs << final_result_json.dump(4) << std::endl;
+            ofs.close();
+            return 0; // Indicate successful UNSAT output
+        }
+        json comp_result_data;
+        try {
+            comp_result_ifs >> comp_result_data;
+        } catch (const json::parse_error& e) {
+            std::cerr << "Error: Cannot parse component result file: " << comp_result_path << " (" << e.what() << ")" << std::endl;
+            comp_result_ifs.close();
+            return 1; // Parse error
+        }
+        comp_result_ifs.close();
+
+        if (!comp_result_data.contains("assignment_list") || !comp_result_data["assignment_list"].is_array()) {
+            std::cerr << "Error: Component result file " << comp_result_path << " has invalid format." << std::endl;
             return 1;
         }
-        final_out_stream << empty_result.dump(4) << endl;
-        final_out_stream.close();
-        return 0; // Success in writing empty result for pre-UNSAT
+        
+        json current_assignments = comp_result_data["assignment_list"];
+        if (current_assignments.empty()) { // This component is UNSAT
+            std::cout << "Component " << comp_map_entry.component_id << " is UNSAT. Overall problem is UNSAT." << std::endl;
+            json final_result_json;
+            final_result_json["assignment_list"] = json::array();
+            std::ofstream ofs(final_output_json_path);
+            if (!ofs.is_open()) return 1;
+            ofs << final_result_json.dump(4) << std::endl;
+            ofs.close();
+            return 0; // Successful UNSAT output
+        }
+        component_assignment_lists.push_back(current_assignments);
+        num_samples_per_component.push_back(current_assignments.size());
     }
 
-    int num_components = manifest_data.value("num_components", 0);
-    json components_array = manifest_data.value("components", json::array());
-    json original_variable_list_full; // To get structure for final output
-
-    // Load the original variable list structure from the original JSON path
-    // This is needed to structure the final combined assignment correctly.
-    string original_json_full_path_str = manifest_data.value("original_json_path", "");
-    if (original_json_full_path_str.empty()) {
-        cerr << "Error: [Merger] 'original_json_path' not found in manifest." << endl;
-        return 1;
-    }
-    ifstream original_json_full_stream(original_json_full_path_str);
-    if (!original_json_full_stream.is_open()) {
-        cerr << "Error: [Merger] Cannot open original JSON file for variable structure: " << original_json_full_path_str << endl;
-        return 1;
-    }
-    json original_json_data_full;
-    try {
-        original_json_full_stream >> original_json_data_full;
-        original_variable_list_full = original_json_data_full.value("variable_list", json::array());
-    } catch (const json::parse_error& e) {
-        cerr << "Error: [Merger] Parsing original JSON for variable structure failed: " << e.what() << endl;
-        original_json_full_stream.close();
-        return 1;
-    }
-    original_json_full_stream.close();
-    if (original_variable_list_full.empty()) {
-        cerr << "Error: [Merger] Original variable_list is empty in " << original_json_full_path_str << endl;
-        return 1;
+    if (component_assignment_lists.empty() && !mapping_info.components.empty()) {
+        // This case should be caught by individual component checks, but as a safeguard:
+        // If there were supposed to be components but we have no assignment lists, something is wrong.
+        // If mapping_info.components was also empty, it's a trivial SAT (handled by JVC usually).
+        std::cerr << "Warning: No component assignment lists loaded, but components were expected." << std::endl;
     }
     
-    // Map original_json_id to its full info for easy lookup
-    std::map<int, json> original_pi_id_to_full_info; // Key is the original "id"
-    for(const auto& var_entry : original_variable_list_full) {
-        // Use "id" from the original variable_list structure
-        original_pi_id_to_full_info[var_entry["id"].get<int>()] = var_entry;
+    if (mapping_info.components.empty()) { // No components to merge, means original problem was trivial SAT
+        json final_result_json;
+        final_result_json["assignment_list"] = json::array(); // Typically one empty assignment for "always true"
+                                                            // Or specific format if needed.
+                                                            // For now, an empty list of assignments means SAT if no constraints.
+                                                            // If there were variables, one assignment of all zeros might be expected.
+                                                            // But this case should be handled by json_v_converter producing a single trivial file.
+        std::ofstream ofs(final_output_json_path);
+        ofs << final_result_json.dump(4) << std::endl;
+        ofs.close();
+        return 0;
     }
 
-
-    std::vector<std::vector<json>> component_sample_lists(num_components);
-    std::vector<const json*> component_pi_info_ptrs(num_components);
-
-
-    for (const auto& comp_entry : components_array) {
-        int comp_id = comp_entry["id"].get<int>();
-        if (comp_id >= num_components) {
-            cerr << "Error: [Merger] Component ID " << comp_id << " out of bounds." << endl;
-            return 1;
-        }
-
-        component_pi_info_ptrs[comp_id] = &comp_entry["primary_inputs"];
-
-        if (comp_entry.value("is_trivial_unsat", false)) {
-            cout << "Info: [Merger] Component " << comp_id << " is trivially UNSAT. Overall problem is UNSAT." << endl;
-            json empty_result;
-            empty_result["assignment_list"] = json::array();
-            empty_result["notes"] = "Problem determined UNSAT due to component " + to_string(comp_id) + ".";
-            ofstream final_out_stream(final_output_json_path_str);
-            final_out_stream << empty_result.dump(4) << endl;
-            final_out_stream.close();
-            return 0; // Successfully wrote UNSAT result
-        }
-
-        if (comp_entry.value("is_trivial_sat", false)) {
-            cout << "Info: [Merger] Component " << comp_id << " is trivially SAT. It contributes no constraints on its PIs for sampling." << endl;
-            // It has no samples file, or an empty one. Treat as having one "empty" sample.
-            // The PIs for this component will be "don't cares" effectively from this component's perspective.
-            // When combining, we can assign them randomly or 0s.
-            // For simplicity, we'll make component_sample_lists[comp_id] have one empty json object
-            // to signify it's satisfied.
-            component_sample_lists[comp_id].push_back(json::array()); // An empty assignment for its (zero) vars
-        }
-        
-        fs::path comp_result_path = manifest_dir / comp_entry["result_json_file"].get<string>();
-        ifstream comp_result_stream(comp_result_path);
-        if (!comp_result_stream.is_open()) {
-            cerr << "Warning: [Merger] Cannot open result file for component " << comp_id << ": " << comp_result_path 
-                 << ". Assuming it has no solutions if not trivial_sat." << endl;
-            // If it's not trivial SAT and file doesn't exist/empty, it means no solutions for this component.
-            component_sample_lists[comp_id].clear(); // Ensure it's empty
-        } else {
-            json comp_result_data;
-            try {
-                comp_result_stream >> comp_result_data;
-                component_sample_lists[comp_id] = comp_result_data.value("assignment_list", json::array());
-            } catch (const json::parse_error& e) {
-                cerr << "Warning: [Merger] Parsing result JSON for component " << comp_id << " failed: " << e.what() 
-                     << ". Assuming no solutions." << endl;
-                component_sample_lists[comp_id].clear();
-            }
-            comp_result_stream.close();
-        }
-
-        if (component_sample_lists[comp_id].empty() && !comp_entry.value("is_trivial_sat", false)) {
-             cout << "Info: [Merger] Component " << comp_id << " has no solutions. Overall problem is UNSAT." << endl;
-            json empty_result;
-            empty_result["assignment_list"] = json::array();
-            empty_result["notes"] = "Problem determined UNSAT because component " + to_string(comp_id) + " has no solutions.";
-            ofstream final_out_stream(final_output_json_path_str);
-            final_out_stream << empty_result.dump(4) << endl;
-            final_out_stream.close();
-            return 0; // Successfully wrote UNSAT result
-        }
-    }
 
     json final_assignment_list = json::array();
-    std::set<string> unique_final_assignments_signatures;
+    std::set<std::string> unique_full_assignment_signatures;
     
-    // Helper lambda to build final assignment and add if unique
-    auto build_and_add_final_assignment = 
-        [&](const json& current_full_assignment_map_param, // original_json_id (string) -> hex_value_string
-            json& target_assignment_list, 
-            std::set<string>& unique_signatures_set) // merge_rng and original_variable_list_full are captured
-    {
-        json final_assignment_entry = json::array();
-        string current_signature_str = "";
+    std::vector<size_t> current_indices(component_assignment_lists.size(), 0);
+    std::mt19937 rng(random_seed_for_merging); // For shuffling or random picking if needed
 
-        for (const auto& var_spec : original_variable_list_full) { // original_variable_list_full captured
-            int current_var_original_id = var_spec["id"].get<int>(); 
-            string hex_value_str;
+    // To get diverse samples, we can iterate through combinations systematically
+    // or pick component samples randomly. Systematic iteration is simpler first.
 
-            if (current_full_assignment_map_param.contains(to_string(current_var_original_id))) {
-                hex_value_str = current_full_assignment_map_param[to_string(current_var_original_id)].get<string>();
-            } else {
-                int bit_width = var_spec["bit_width"].get<int>();
-                unsigned long long random_val = 0;
-                if (bit_width > 0) {
-                    std::uniform_int_distribution<unsigned long long> dist_val;
-                    if (bit_width < 64) {
-                        dist_val = std::uniform_int_distribution<unsigned long long>(0, (1ULL << bit_width) - 1);
-                    } else { // bit_width == 64
-                        dist_val = std::uniform_int_distribution<unsigned long long>(0, ULLONG_MAX);
-                    }
-                    random_val = dist_val(merge_rng); // Use captured merge_rng
-                }
-                hex_value_str = to_hex_string(random_val, bit_width);
-            }
-            final_assignment_entry.push_back({{"value", hex_value_str}});
-            current_signature_str += hex_value_str + ";";
+    long long total_possible_combinations = 1;
+    for(size_t count : num_samples_per_component) {
+        if (count == 0) { // Should have been caught by UNSAT check above
+            total_possible_combinations = 0;
+            break;
         }
-        
-        if (unique_signatures_set.find(current_signature_str) == unique_signatures_set.end()) {
-            unique_signatures_set.insert(current_signature_str);
-            target_assignment_list.push_back(final_assignment_entry);
-            return true;
-        }
-        return false;
-    };
-
-    bool single_normal_component_case = false;
-    if (num_components == 1) {
-        const auto& comp_entry_manifest = manifest_data["components"][0];
-        if (!comp_entry_manifest.value("is_trivial_unsat", false) &&
-            !comp_entry_manifest.value("is_trivial_sat", false) &&
-            !component_sample_lists[0].empty()) { // Has actual solutions
-            single_normal_component_case = true;
+        if ((double)total_possible_combinations * count > std::numeric_limits<long long>::max()) {
+            total_possible_combinations = std::numeric_limits<long long>::max(); // Cap to avoid overflow
+        } else {
+            total_possible_combinations *= count;
         }
     }
-
-    if (single_normal_component_case) {
-        const auto& samples_from_single_component = component_sample_lists[0];
-        const json& comp_pis_info = *component_pi_info_ptrs[0]; // comp_idx is 0
-
-        for (const auto& comp_sample : samples_from_single_component) {
-            if (final_assignment_list.size() >= static_cast<size_t>(total_samples_required)) {
-                break;
-            }
-
-            json current_full_assignment_map; // original_json_id (string) -> hex_value_string
-            if (comp_pis_info.size() != comp_sample.size()) {
-                 cerr << "Warning: [Merger] Mismatch in PI count (" << comp_pis_info.size() 
-                      << ") and sample value count (" << comp_sample.size() 
-                      << ") for single component. Skipping this sample." << endl;
-                 continue; 
-            }
-            for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
-                int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
-                string hex_val = comp_sample[pi_local_idx]["value"].get<string>();
-                current_full_assignment_map[to_string(original_json_id)] = hex_val;
-            }
-            build_and_add_final_assignment(current_full_assignment_map, final_assignment_list, unique_final_assignments_signatures);
-        }
-    } else { // Multiple components, or single trivial component, or no components (num_components == 0)
-        std::vector<std::uniform_int_distribution<int>> dists;
-        bool possible_to_generate_more_combinations = true; // Renamed for clarity
-        for(int i=0; i<num_components; ++i) {
-            if (component_sample_lists[i].empty()) { 
-                // This implies a non-trivial_sat component has no solutions,
-                // which should have been caught as UNSAT.
-                // If trivial_sat, list has one `[]` sample, so not empty.
-                cerr << "Error: [Merger] Component " << i << " has empty sample list unexpectedly." << endl;
-                possible_to_generate_more_combinations = false;
-                break;
-            }
-            dists.emplace_back(0, component_sample_lists[i].size() - 1);
-        }
-        
-        if (!possible_to_generate_more_combinations && num_components > 0) {
-             // Problem already indicated, or will result in no samples.
-        }
+    
+    if (total_possible_combinations == 0 && !component_assignment_lists.empty()) {
+         // This means some component had 0 samples, should be caught by UNSAT logic.
+         // Writing empty assignment list as a fallback.
+        json final_result_json;
+        final_result_json["assignment_list"] = json::array();
+        std::ofstream ofs(final_output_json_path);
+        ofs << final_result_json.dump(4) << std::endl;
+        ofs.close();
+        return 0; 
+    }
 
 
-        long long max_possible_combinations = 1;
-        if (num_components > 0) { // Only calculate if there are components to combine
-            for(int i=0; i<num_components; ++i) {
-                if (component_sample_lists[i].empty()) { // Should not happen if possible_to_generate_more_combinations is true
-                    max_possible_combinations = 0; break;
-                }
-                if ((double)max_possible_combinations * component_sample_lists[i].size() > 2e9 ) { 
-                    max_possible_combinations = 2000000000; 
-                    break;
-                }
-                max_possible_combinations *= component_sample_lists[i].size();
-            }
-        } else { // num_components == 0
-            max_possible_combinations = 1; // Can generate 1 type of sample (all random)
-        }
+    int generated_count = 0;
+    long long combinations_tried = 0;
 
-        long long attempts_for_uniqueness = std::min(max_possible_combinations, (long long)total_samples_required * 200); 
-        if (num_components == 0 && total_samples_required > 0) { 
-            attempts_for_uniqueness = std::max(1LL, (long long)total_samples_required); // Ensure enough attempts for all-random case
-        } else if (total_samples_required == 0) {
-            attempts_for_uniqueness = 0;
-        }
+    while(generated_count < total_samples_to_generate && combinations_tried < total_possible_combinations) {
+        std::map<std::string, std::string> current_full_assignment_map; // Original_var_name -> hex_value
 
-
-        for (long long attempt = 0; 
-            possible_to_generate_more_combinations && final_assignment_list.size() < static_cast<size_t>(total_samples_required) && attempt < attempts_for_uniqueness; 
-            ++attempt) {
+        for (size_t comp_i = 0; comp_i < component_assignment_lists.size(); ++comp_i) {
+            const auto& comp_map_entry = mapping_info.components[comp_i]; // Assumes sorted by ID
+            const json& samples_for_this_comp = component_assignment_lists[comp_i];
+            size_t sample_idx_for_comp = current_indices[comp_i];
             
-            json current_full_assignment_map; 
-            bool current_combination_valid = true;
+            const json& one_sample_from_comp = samples_for_this_comp[sample_idx_for_comp]; // This is an array of {"value": "hex"}
 
-            for (int comp_idx = 0; comp_idx < num_components; ++comp_idx) {
-                if (component_sample_lists[comp_idx].empty()) { // Should be caught by possible_to_generate_more_combinations
-                    current_combination_valid = false; break;
-                }
-                
-                int sample_idx_for_comp = dists[comp_idx](merge_rng);
-                const json& comp_sample = component_sample_lists[comp_idx][sample_idx_for_comp]; 
-                const json& comp_pis_info = *component_pi_info_ptrs[comp_idx]; 
-                bool is_current_comp_trivial_sat = manifest_data["components"][comp_idx].value("is_trivial_sat", false);
-
-                if (comp_pis_info.size() != comp_sample.size() && !is_current_comp_trivial_sat) {
-                    cerr << "Error: [Merger] Mismatch in PI count and sample value count for component " << comp_idx << endl;
-                    current_combination_valid = false; break;
-                }
-
-                if (!is_current_comp_trivial_sat) {
-                    for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
-                        if (pi_local_idx < comp_sample.size()) {
-                            int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
-                            string hex_val = comp_sample[pi_local_idx]["value"].get<string>(); 
-                            current_full_assignment_map[to_string(original_json_id)] = hex_val; 
-                        } else {
-                            cerr << "Warning: [Merger] Sample array too short for PIs in non-trivial component " << comp_idx << endl;
-                            current_combination_valid = false; break;
-                        }
-                    }
-                }
-                if (!current_combination_valid) break;
+            // The one_sample_from_comp array corresponds to variables in comp_map_entry.variable_names
+            // AND ALSO to variables in that component's mini-JSON variable_list.
+            if (one_sample_from_comp.size() != comp_map_entry.variable_names.size()) {
+                 std::cerr << "Mismatch in variable count for component " << comp_map_entry.component_id << std::endl;
+                 return 1; // Data integrity error
             }
-            if (!current_combination_valid) continue; // Try next random combination
 
-            build_and_add_final_assignment(current_full_assignment_map, final_assignment_list, unique_final_assignments_signatures);
+            for (size_t var_k = 0; var_k < comp_map_entry.variable_names.size(); ++var_k) {
+                const std::string& original_var_name = comp_map_entry.variable_names[var_k];
+                current_full_assignment_map[original_var_name] = one_sample_from_comp[var_k].value("value", "0");
+            }
         }
-    }
-    
-    if (final_assignment_list.size() < static_cast<size_t>(total_samples_required) && total_samples_required > 0) {
-        cout << "Warning: [Merger] Could only generate " << final_assignment_list.size() 
-             << " unique samples out of " << total_samples_required << " requested." << endl;
-    }
 
-    json final_result_json_output;
-    final_result_json_output["assignment_list"] = final_assignment_list;
-    
-    ofstream final_out_stream(final_output_json_path_str);
-    if (!final_out_stream.is_open()) {
-        cerr << "Error: [Merger] Cannot write final merged result JSON: " << final_output_json_path_str << endl;
-        return 1;
+        // Construct the final JSON entry based on original_variable_list order
+        json one_final_assignment_entry = json::array();
+        for (const auto& orig_var_json : mapping_info.original_variable_list_json) {
+            std::string orig_var_name = orig_var_json.value("name", "");
+            int bit_width = orig_var_json.value("bit_width",1);
+            std::string val_hex = "0"; // Default if var not in any component (should not happen for constrained vars)
+            if (current_full_assignment_map.count(orig_var_name)) {
+                val_hex = current_full_assignment_map[orig_var_name];
+            } else {
+                // If a variable from original_variable_list was not in any component,
+                // it means it was not part of any constraint. Assign default (e.g., 0).
+                // This requires to_hex_string to be available or use a pre-formatted zero.
+                // For simplicity, use "0", but proper hex width might be desired.
+                // val_hex = to_hex_string(0, bit_width); // if to_hex_string is linkable here
+            }
+            one_final_assignment_entry.push_back({{"value", val_hex}});
+        }
+        
+        std::string assignment_signature = one_final_assignment_entry.dump();
+        if (unique_full_assignment_signatures.insert(assignment_signature).second) {
+            final_assignment_list.push_back(one_final_assignment_entry);
+            generated_count++;
+        }
+
+        // Advance current_indices (like incrementing a mixed-radix number)
+        int k_radix = 0;
+        while(k_radix < current_indices.size()){
+            current_indices[k_radix]++;
+            if(current_indices[k_radix] < num_samples_per_component[k_radix]) break; // No carry
+            current_indices[k_radix] = 0; // Reset and carry
+            k_radix++;
+        }
+        if(k_radix == current_indices.size()) break; // All combinations exhausted
+
+        combinations_tried++;
     }
-    final_out_stream << final_result_json_output.dump(4) << endl;
-    final_out_stream.close();
     
-    cout << "Info: [Merger] Successfully merged results into " << final_output_json_path_str << endl;
-    return 0;
+    json final_result_json;
+    final_result_json["assignment_list"] = final_assignment_list;
+    std::ofstream ofs(final_output_json_path);
+    if (!ofs.is_open()) return 1;
+    ofs << final_result_json.dump(4) << std::endl;
+    ofs.close();
+
+    return 0; // Success
 }
