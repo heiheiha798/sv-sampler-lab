@@ -519,9 +519,9 @@ int json_v_converter(const string &input_json_path,
         for (auto const& [root_idx, dsu_comp_obj] : dsu_components_map) {
             DSUComponentSortInfo current_dsu_sort_info;
             current_dsu_sort_info.root_representative_constraint_idx = dsu_comp_obj.root_representative_constraint_idx;
-            current_dsu_sort_info.size_metric = dsu_comp_obj.constraint_unique_ids_in_component.size();
             current_dsu_sort_info.this_dsu_makes_problem_unsat = false;
             int effective_constraints_in_this_dsu = 0;
+            std::vector<std::string> temp_effective_wire_names_for_this_dsu;
 
             for (int pi_id : dsu_comp_obj.pi_var_ids_in_component) {
                 all_pi_ids_for_merged_component.insert(pi_id);
@@ -541,10 +541,12 @@ int json_v_converter(const string &input_json_path,
                     }
                 } else {
                     merged_constraint_assign_statements.push_back("    assign " + cnstr_info.assigned_wire_name + " = |(" + cnstr_info.verilog_expression_body + ");");
-                    current_dsu_sort_info.effective_wire_names_from_this_dsu.push_back(cnstr_info.assigned_wire_name);
+                    temp_effective_wire_names_for_this_dsu.push_back(cnstr_info.assigned_wire_name);
                     effective_constraints_in_this_dsu++;
                 }
             }
+            current_dsu_sort_info.size_metric = effective_constraints_in_this_dsu;
+            current_dsu_sort_info.effective_wire_names_from_this_dsu = temp_effective_wire_names_for_this_dsu;
             current_dsu_sort_info.this_dsu_is_trivial_sat = (!current_dsu_sort_info.this_dsu_makes_problem_unsat && effective_constraints_in_this_dsu == 0);
             dsu_sort_list.push_back(current_dsu_sort_info);
         }
