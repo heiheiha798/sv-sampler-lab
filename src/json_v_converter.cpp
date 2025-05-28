@@ -1,11 +1,6 @@
-// solver_functions.h needs to be present, or its declarations.
-// For now, I'll assume a minimal solver_functions.h if not provided,
-// or just declare what's needed by this file.
 #ifndef SOLVER_FUNCTIONS_H
 #define SOLVER_FUNCTIONS_H
 #include <string>
-// Assuming to_string from <string> is sufficient if it's just std::to_string
-// If it's a custom to_string for specific types, that needs to be defined.
 #endif
 
 #include "nlohmann/json.hpp"

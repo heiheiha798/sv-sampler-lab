@@ -1,4 +1,3 @@
-// File: results_merger.cpp
 #include "solver_functions.h" // For to_hex_string, and potentially json type
 #include "nlohmann/json.hpp"
 #include <iostream>
@@ -8,6 +7,7 @@
 #include <set>
 #include <map>
 #include <random>
+#include <climits>
 #include <algorithm> // For std::shuffle if needed
 #include <filesystem> // For path manipulation
 
@@ -130,8 +130,7 @@ int merge_bdd_results(const string &manifest_path_str,
             // When combining, we can assign them randomly or 0s.
             // For simplicity, we'll make component_sample_lists[comp_id] have one empty json object
             // to signify it's satisfied.
-             component_sample_lists[comp_id].push_back(json::array()); // An empty assignment for its (zero) vars
-            continue; 
+            component_sample_lists[comp_id].push_back(json::array()); // An empty assignment for its (zero) vars
         }
         
         fs::path comp_result_path = manifest_dir / comp_entry["result_json_file"].get<string>();
@@ -215,18 +214,25 @@ int merge_bdd_results(const string &manifest_path_str,
             }
             
             int sample_idx_for_comp = dists[comp_idx](merge_rng);
-            const json& comp_sample = component_sample_lists[comp_idx][sample_idx_for_comp]; // This is an array of {value:"hex"}
-            const json& comp_pis_info = *component_pi_info_ptrs[comp_idx]; // Array of PI info objects
+            const json& comp_sample = component_sample_lists[comp_idx][sample_idx_for_comp]; 
+            const json& comp_pis_info = *component_pi_info_ptrs[comp_idx]; 
+            bool is_current_comp_trivial_sat = manifest_data["components"][comp_idx].value("is_trivial_sat", false);
 
-            if (comp_pis_info.size() != comp_sample.size() && !manifest_data["components"][comp_idx].value("is_trivial_sat", false)) {
+            if (comp_pis_info.size() != comp_sample.size() && !is_current_comp_trivial_sat) {
                  cerr << "Error: [Merger] Mismatch in PI count and sample value count for component " << comp_idx << endl;
                  possible_to_generate_more = false; break;
             }
 
-            for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
-                int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
-                string hex_val = comp_sample[pi_local_idx]["value"].get<string>();
-                current_full_assignment_map[to_string(original_json_id)] = hex_val; 
+            if (!is_current_comp_trivial_sat) {
+                for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
+                    if (pi_local_idx < comp_sample.size()) {
+                        int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
+                        string hex_val = comp_sample[pi_local_idx]["value"].get<string>(); 
+                        current_full_assignment_map[to_string(original_json_id)] = hex_val; 
+                    } else {
+                        cerr << "Warning: [Merger] Sample array too short for PIs in non-trivial component " << comp_idx << endl;
+                    }
+                }
             }
         }
         if (!possible_to_generate_more) break;
