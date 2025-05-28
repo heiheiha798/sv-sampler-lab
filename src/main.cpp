@@ -16,33 +16,64 @@ using json = nlohmann::json;
 int run_yosys(const string &yosys_executable, const string &verilog_file, const string &aig_file)
 {
     string yosys_log_file = aig_file + ".yosys.log"; // Create a log file name
-    // Using the robust Yosys script
-    std::string yosys_script = "read_verilog " + verilog_file +
-                             "; hierarchy -check; proc; opt; memory_dff; opt; fsm; opt" +
-                             "; techmap; opt" +
-                             "; abc -g AND; opt" +
-                             "; aigmap" +
-                             "; write_aiger -ascii " + aig_file +
-                             ";";
+
+    // 使用你指定的 Yosys 脚本内容
+    // 注意：这里直接将你的脚本内容嵌入到字符串中。
+    // Yosys 命令中的分号是重要的，它们分隔了不同的 Yosys 内部命令。
+    // 我们需要确保Verilog文件名和AIG文件名被正确地插入。
+    std::string yosys_script_template =
+        "read_verilog \"{GENERATED_V_FILE}\"; " // {GENERATED_V_FILE} 是占位符
+        "synth -auto-top; "
+        "abc; "
+        "aigmap; "
+        "opt; "
+        "clean; "
+        "write_aiger -ascii \"{OUTPUT_AIG_FILE}\";"; // {OUTPUT_AIG_FILE} 是占位符
+
+    // 替换占位符
+    std::string yosys_script = yosys_script_template;
+    size_t pos;
+
+    // 替换 Verilog 文件占位符
+    pos = yosys_script.find("{GENERATED_V_FILE}");
+    if (pos != std::string::npos) {
+        yosys_script.replace(pos, std::string("{GENERATED_V_FILE}").length(), verilog_file);
+    } else {
+        std::cerr << "Error: Placeholder {GENERATED_V_FILE} not found in Yosys script template." << std::endl;
+        return 1; // Or handle error appropriately
+    }
+
+    // 替换 AIG 文件占位符
+    pos = yosys_script.find("{OUTPUT_AIG_FILE}");
+    if (pos != std::string::npos) {
+        yosys_script.replace(pos, std::string("{OUTPUT_AIG_FILE}").length(), aig_file);
+    } else {
+        std::cerr << "Error: Placeholder {OUTPUT_AIG_FILE} not found in Yosys script template." << std::endl;
+        return 1; // Or handle error appropriately
+    }
+    
+    // 构建完整的Yosys命令，并将标准输出和标准错误重定向到日志文件
     std::string yosys_command = yosys_executable + " -p \"" + yosys_script + "\" > \"" + yosys_log_file + "\" 2>&1";
 
 
-    // std::cout << "Executing Yosys: " << yosys_command << std::endl;
-    // std::cout << "Yosys log will be in: " << yosys_log_file << std::endl;
-    int ret = system(yosys_command.c_str());
+    // std::cout << "Executing Yosys: " << yosys_command << std::endl; // 用于调试
+    // std::cout << "Yosys log will be in: " << yosys_log_file << std::endl; // 用于调试
+    int ret = system(yosys_command.c_str()); // 执行Yosys命令
 
-    if (ret != 0)
+    if (ret != 0) // 如果Yosys执行失败
     {
+        // 打印错误信息和日志文件路径
         std::cerr << "Yosys failed with exit code " << ret << " for " << verilog_file << std::endl;
         std::cerr << "Check Yosys log for details: " << yosys_log_file << std::endl;
+        // 尝试读取并打印Yosys日志文件的内容
         std::ifstream log_stream(yosys_log_file);
         if (log_stream.is_open())
         {
             std::cerr << "--- Yosys Log Start ---" << std::endl;
-            std::string line;
-            while (getline(log_stream, line))
+            std::string line_content; // Renamed to avoid conflict with using std::line
+            while (getline(log_stream, line_content))
             {
-                std::cerr << line << std::endl;
+                std::cerr << line_content << std::endl;
             }
             std::cerr << "--- Yosys Log End ---" << std::endl;
             log_stream.close();
@@ -52,7 +83,7 @@ int run_yosys(const string &yosys_executable, const string &verilog_file, const 
             std::cerr << "Could not open Yosys log file: " << yosys_log_file << std::endl;
         }
     }
-    return ret;
+    return ret; // 返回Yosys的退出码
 }
 
 int main(int argc, char *argv[])
