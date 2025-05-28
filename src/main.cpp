@@ -161,7 +161,6 @@ int main(int argc, char *argv[]) {
                 
                 // Calculate samples based on N^(1/k) + 100 strategy
                 // Only exclude trivial_unsat components from k calculation
-                int total_components = components_array.size();
                 int effective_components_for_sampling = 0;
                 
                 // Count components that can contribute to sampling (exclude only trivial_unsat)
@@ -171,20 +170,27 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 
-                if (effective_components_for_sampling > 0 && num_samples > 0) {
-                    // Calculate N^(1/k) where N = num_samples, k = effective_components_for_sampling
-                    double base_samples = std::pow(static_cast<double>(num_samples), 1.0 / static_cast<double>(effective_components_for_sampling));
-                    samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 50;
-                    
-                    // Ensure minimum samples for edge cases
+                if (num_samples == 0) {
+                    samples_for_this_component = 0;
+                } else { // num_samples > 0
+                    if (effective_components_for_sampling == 0) {
+                        // This implies all components were trivial_unsat.
+                        // Current comp_entry should also be trivial_unsat if this is the case.
+                        // If by some logic error comp_entry is not trivial_unsat, treat it as the only one.
+                        samples_for_this_component = comp_entry.value("is_trivial_unsat", false) ? 0 : num_samples;
+                    } else if (effective_components_for_sampling == 1) {
+                        // If there's only one non-trivial_unsat component overall (which must be this one if we are solving it),
+                        // it gets all num_samples without the +50.
+                        samples_for_this_component = num_samples;
+                    } else { // effective_components_for_sampling > 1
+                        double base_samples = std::pow(static_cast<double>(num_samples), 1.0 / static_cast<double>(effective_components_for_sampling));
+                        samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 50;
+                    }
+
+                    // Ensure minimum samples for num_samples > 0, if calculated samples are too low
                     if (samples_for_this_component < 1) {
                         samples_for_this_component = 1;
                     }
-                } else if (num_samples == 0) {
-                    samples_for_this_component = 0;
-                } else {
-                    // Fallback: should not happen if we have valid components
-                    samples_for_this_component = 100;
                 }
                 
                 int bdd_ret = aig_to_bdd_solver(comp_aig_path.string(), 

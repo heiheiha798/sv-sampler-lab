@@ -168,87 +168,21 @@ int merge_bdd_results(const string &manifest_path_str,
     json final_assignment_list = json::array();
     std::set<string> unique_final_assignments_signatures;
     
-    // Prepare indices for random selection from each component's sample list
-    std::vector<std::uniform_int_distribution<int>> dists;
-    std::vector<int> current_indices(num_components, 0); // For Cartesian product like iteration if needed
-    bool possible_to_generate_more = true;
-    for(int i=0; i<num_components; ++i) {
-        if (component_sample_lists[i].empty()) { // Should have been caught above
-            possible_to_generate_more = false;
-            break;
-        }
-        dists.emplace_back(0, component_sample_lists[i].size() - 1);
-    }
-
-
-    // Max attempts to find unique combined samples
-    // Product of sample counts can be huge. We don't want to try all.
-    long long max_possible_combinations = 1;
-    for(int i=0; i<num_components; ++i) {
-        if ((double)max_possible_combinations * component_sample_lists[i].size() > 2e9 || component_sample_lists[i].empty()) { // Avoid overflow
-             max_possible_combinations = 2000000000; // A large number
-             break;
-        }
-        max_possible_combinations *= component_sample_lists[i].size();
-    }
-    long long attempts_for_uniqueness = std::min(max_possible_combinations, (long long)total_samples_required * 200); 
-                                        // Limit attempts for practical reasons
-    if (num_components == 0 && total_samples_required > 0) { // No components, but samples requested (e.g. only global vars)
-        attempts_for_uniqueness = 1; // Will generate one sample if possible
-    } else if (num_components == 0 && total_samples_required == 0) {
-        attempts_for_uniqueness = 0;
-    }
-
-
-    for (long long attempt = 0; 
-         possible_to_generate_more && final_assignment_list.size() < total_samples_required && attempt < attempts_for_uniqueness; 
-         ++attempt) {
-        
-        json current_full_assignment_map; // Map original_json_id to its hex value string
-                                          // e.g. {0: "AB", 2: "1", ...}
-
-        // Populate from components
-        for (int comp_idx = 0; comp_idx < num_components; ++comp_idx) {
-            if (component_sample_lists[comp_idx].empty()) { // Should not happen if pre-checks are good
-                possible_to_generate_more = false; break;
-            }
-            
-            int sample_idx_for_comp = dists[comp_idx](merge_rng);
-            const json& comp_sample = component_sample_lists[comp_idx][sample_idx_for_comp]; 
-            const json& comp_pis_info = *component_pi_info_ptrs[comp_idx]; 
-            bool is_current_comp_trivial_sat = manifest_data["components"][comp_idx].value("is_trivial_sat", false);
-
-            if (comp_pis_info.size() != comp_sample.size() && !is_current_comp_trivial_sat) {
-                 cerr << "Error: [Merger] Mismatch in PI count and sample value count for component " << comp_idx << endl;
-                 possible_to_generate_more = false; break;
-            }
-
-            if (!is_current_comp_trivial_sat) {
-                for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
-                    if (pi_local_idx < comp_sample.size()) {
-                        int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
-                        string hex_val = comp_sample[pi_local_idx]["value"].get<string>(); 
-                        current_full_assignment_map[to_string(original_json_id)] = hex_val; 
-                    } else {
-                        cerr << "Warning: [Merger] Sample array too short for PIs in non-trivial component " << comp_idx << endl;
-                    }
-                }
-            }
-        }
-        if (!possible_to_generate_more) break;
-
-        // Create the final assignment entry in the order of original_variable_list_full
+    // Helper lambda to build final assignment and add if unique
+    auto build_and_add_final_assignment = 
+        [&](const json& current_full_assignment_map_param, // original_json_id (string) -> hex_value_string
+            json& target_assignment_list, 
+            std::set<string>& unique_signatures_set) // merge_rng and original_variable_list_full are captured
+    {
         json final_assignment_entry = json::array();
         string current_signature_str = "";
 
-        for (const auto& var_spec : original_variable_list_full) { // var_spec is an entry from original variable_list
-            // Use "id" from the original variable_list structure
+        for (const auto& var_spec : original_variable_list_full) { // original_variable_list_full captured
             int current_var_original_id = var_spec["id"].get<int>(); 
             string hex_value_str;
 
-            // current_full_assignment_map stores values keyed by stringified original "id"
-            if (current_full_assignment_map.contains(to_string(current_var_original_id))) {
-                hex_value_str = current_full_assignment_map[to_string(current_var_original_id)].get<string>();
+            if (current_full_assignment_map_param.contains(to_string(current_var_original_id))) {
+                hex_value_str = current_full_assignment_map_param[to_string(current_var_original_id)].get<string>();
             } else {
                 int bit_width = var_spec["bit_width"].get<int>();
                 unsigned long long random_val = 0;
@@ -259,7 +193,7 @@ int merge_bdd_results(const string &manifest_path_str,
                     } else { // bit_width == 64
                         dist_val = std::uniform_int_distribution<unsigned long long>(0, ULLONG_MAX);
                     }
-                    random_val = dist_val(merge_rng); // Use the rng specific to merger
+                    random_val = dist_val(merge_rng); // Use captured merge_rng
                 }
                 hex_value_str = to_hex_string(random_val, bit_width);
             }
@@ -267,13 +201,134 @@ int merge_bdd_results(const string &manifest_path_str,
             current_signature_str += hex_value_str + ";";
         }
         
-        if (unique_final_assignments_signatures.find(current_signature_str) == unique_final_assignments_signatures.end()) {
-            unique_final_assignments_signatures.insert(current_signature_str);
-            final_assignment_list.push_back(final_assignment_entry);
+        if (unique_signatures_set.find(current_signature_str) == unique_signatures_set.end()) {
+            unique_signatures_set.insert(current_signature_str);
+            target_assignment_list.push_back(final_assignment_entry);
+            return true;
+        }
+        return false;
+    };
+
+    bool single_normal_component_case = false;
+    if (num_components == 1) {
+        const auto& comp_entry_manifest = manifest_data["components"][0];
+        if (!comp_entry_manifest.value("is_trivial_unsat", false) &&
+            !comp_entry_manifest.value("is_trivial_sat", false) &&
+            !component_sample_lists[0].empty()) { // Has actual solutions
+            single_normal_component_case = true;
+        }
+    }
+
+    if (single_normal_component_case) {
+        const auto& samples_from_single_component = component_sample_lists[0];
+        const json& comp_pis_info = *component_pi_info_ptrs[0]; // comp_idx is 0
+
+        for (const auto& comp_sample : samples_from_single_component) {
+            if (final_assignment_list.size() >= static_cast<size_t>(total_samples_required)) {
+                break;
+            }
+
+            json current_full_assignment_map; // original_json_id (string) -> hex_value_string
+            if (comp_pis_info.size() != comp_sample.size()) {
+                 cerr << "Warning: [Merger] Mismatch in PI count (" << comp_pis_info.size() 
+                      << ") and sample value count (" << comp_sample.size() 
+                      << ") for single component. Skipping this sample." << endl;
+                 continue; 
+            }
+            for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
+                int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
+                string hex_val = comp_sample[pi_local_idx]["value"].get<string>();
+                current_full_assignment_map[to_string(original_json_id)] = hex_val;
+            }
+            build_and_add_final_assignment(current_full_assignment_map, final_assignment_list, unique_final_assignments_signatures);
+        }
+    } else { // Multiple components, or single trivial component, or no components (num_components == 0)
+        std::vector<std::uniform_int_distribution<int>> dists;
+        bool possible_to_generate_more_combinations = true; // Renamed for clarity
+        for(int i=0; i<num_components; ++i) {
+            if (component_sample_lists[i].empty()) { 
+                // This implies a non-trivial_sat component has no solutions,
+                // which should have been caught as UNSAT.
+                // If trivial_sat, list has one `[]` sample, so not empty.
+                cerr << "Error: [Merger] Component " << i << " has empty sample list unexpectedly." << endl;
+                possible_to_generate_more_combinations = false;
+                break;
+            }
+            dists.emplace_back(0, component_sample_lists[i].size() - 1);
+        }
+        
+        if (!possible_to_generate_more_combinations && num_components > 0) {
+             // Problem already indicated, or will result in no samples.
+        }
+
+
+        long long max_possible_combinations = 1;
+        if (num_components > 0) { // Only calculate if there are components to combine
+            for(int i=0; i<num_components; ++i) {
+                if (component_sample_lists[i].empty()) { // Should not happen if possible_to_generate_more_combinations is true
+                    max_possible_combinations = 0; break;
+                }
+                if ((double)max_possible_combinations * component_sample_lists[i].size() > 2e9 ) { 
+                    max_possible_combinations = 2000000000; 
+                    break;
+                }
+                max_possible_combinations *= component_sample_lists[i].size();
+            }
+        } else { // num_components == 0
+            max_possible_combinations = 1; // Can generate 1 type of sample (all random)
+        }
+
+        long long attempts_for_uniqueness = std::min(max_possible_combinations, (long long)total_samples_required * 200); 
+        if (num_components == 0 && total_samples_required > 0) { 
+            attempts_for_uniqueness = std::max(1LL, (long long)total_samples_required); // Ensure enough attempts for all-random case
+        } else if (total_samples_required == 0) {
+            attempts_for_uniqueness = 0;
+        }
+
+
+        for (long long attempt = 0; 
+            possible_to_generate_more_combinations && final_assignment_list.size() < static_cast<size_t>(total_samples_required) && attempt < attempts_for_uniqueness; 
+            ++attempt) {
+            
+            json current_full_assignment_map; 
+            bool current_combination_valid = true;
+
+            for (int comp_idx = 0; comp_idx < num_components; ++comp_idx) {
+                if (component_sample_lists[comp_idx].empty()) { // Should be caught by possible_to_generate_more_combinations
+                    current_combination_valid = false; break;
+                }
+                
+                int sample_idx_for_comp = dists[comp_idx](merge_rng);
+                const json& comp_sample = component_sample_lists[comp_idx][sample_idx_for_comp]; 
+                const json& comp_pis_info = *component_pi_info_ptrs[comp_idx]; 
+                bool is_current_comp_trivial_sat = manifest_data["components"][comp_idx].value("is_trivial_sat", false);
+
+                if (comp_pis_info.size() != comp_sample.size() && !is_current_comp_trivial_sat) {
+                    cerr << "Error: [Merger] Mismatch in PI count and sample value count for component " << comp_idx << endl;
+                    current_combination_valid = false; break;
+                }
+
+                if (!is_current_comp_trivial_sat) {
+                    for (size_t pi_local_idx = 0; pi_local_idx < comp_pis_info.size(); ++pi_local_idx) {
+                        if (pi_local_idx < comp_sample.size()) {
+                            int original_json_id = comp_pis_info[pi_local_idx]["original_json_id"].get<int>();
+                            string hex_val = comp_sample[pi_local_idx]["value"].get<string>(); 
+                            current_full_assignment_map[to_string(original_json_id)] = hex_val; 
+                        } else {
+                            cerr << "Warning: [Merger] Sample array too short for PIs in non-trivial component " << comp_idx << endl;
+                            current_combination_valid = false; break;
+                        }
+                    }
+                }
+                if (!current_combination_valid) break;
+            }
+            if (!current_combination_valid) continue; // Try next random combination
+
+            build_and_add_final_assignment(current_full_assignment_map, final_assignment_list, unique_final_assignments_signatures);
         }
     }
     
-    if (final_assignment_list.size() < total_samples_required) {
+    if (final_assignment_list.size() < static_cast<size_t>(total_samples_required) && total_samples_required > 0) {
         cout << "Warning: [Merger] Could only generate " << final_assignment_list.size() 
              << " unique samples out of " << total_samples_required << " requested." << endl;
     }
