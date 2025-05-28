@@ -612,7 +612,7 @@ conftest.c:27:6: warning: conflicting types for built-in function 'pow'; expecte
       |      ^~~
 conftest.c:1:1: note: 'pow' is declared in header '<math.h>'
     1 | /* confdefs.h */
-/usr/bin/ld: /tmp/cc8zVlgR.o: in function `main':
+/usr/bin/ld: /tmp/ccSWMROa.o: in function `main':
 /root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `pow'
 collect2: error: ld returned 1 exit status
 configure:18014: $? = 1
@@ -665,7 +665,7 @@ configure:18066: $? = 0
 configure:18076: result: yes
 configure:18094: checking for library containing WSAStartup
 configure:18124: gcc -o conftest -Wall -Wextra -g -O3   conftest.c -lm  >&5
-/usr/bin/ld: /tmp/ccOCNjWX.o: in function `main':
+/usr/bin/ld: /tmp/cc8eI1Bu.o: in function `main':
 /root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `WSAStartup'
 collect2: error: ld returned 1 exit status
 configure:18124: $? = 1
@@ -746,7 +746,7 @@ configure: failed program was:
 configure:18144: result: no
 configure:18153: checking for library containing GetProcessMemoryInfo
 configure:18183: gcc -o conftest -Wall -Wextra -g -O3   conftest.c -lm  >&5
-/usr/bin/ld: /tmp/ccTM6GB7.o: in function `main':
+/usr/bin/ld: /tmp/ccMGgf4e.o: in function `main':
 /root/sv-sampler-lab/cudd/conftest.c:31: undefined reference to `GetProcessMemoryInfo'
 collect2: error: ld returned 1 exit status
 configure:18183: $? = 1

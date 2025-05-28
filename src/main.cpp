@@ -5,7 +5,9 @@
 #include <vector>
 #include <fstream>      // For reading manifest
 #include <cstdlib>      // For system()
-#include "solver_functions.h"
+#include <chrono>       // For timing
+#include <utility>      // For std::pair
+#include "solver_functions.h" // Now includes SolverDetailedTimings and new aig_to_bdd_solver declaration
 #include "nlohmann/json.hpp" // For parsing manifest
 
 using json = nlohmann::json;
@@ -14,7 +16,6 @@ namespace fs = std::filesystem;
 
 // Forward declarations for functions that will be in this file or linked
 int json_v_converter(const std::string &input_json_path, const std::string &output_v_dir);
-int aig_to_bdd_solver(const string &aig_file_path, const string &original_json_path, int num_samples, const string &result_json_path, unsigned int random_seed);
 int merge_bdd_results(const string &manifest_path_str, const string &final_output_json_path_str, int total_samples_required, unsigned int random_seed);
 
 
@@ -66,7 +67,8 @@ int main(int argc, char *argv[]) {
     if (mode == "json-to-v" && argc == 4) {
         return json_v_converter(argv[2], argv[3]);
     } else if (mode == "aig-to-bdd" && argc == 7) {
-        return aig_to_bdd_solver(argv[2], argv[3], stoi(argv[4]), argv[5], stoul(argv[6]));
+        std::pair<int, SolverDetailedTimings> result = aig_to_bdd_solver(argv[2], argv[3], stoi(argv[4]), argv[5], stoul(argv[6]));
+        return result.first; // Return only the status code
     } else if (mode == "merge-results" && argc == 6) {
         return merge_bdd_results(argv[2], argv[3], stoi(argv[4]), stoul(argv[5]));
     } else if (mode == "solve-decomposed" && (argc == 6 || argc == 7)) {
@@ -76,12 +78,19 @@ int main(int argc, char *argv[]) {
         unsigned int random_seed = stoul(argv[5]);
         string yosys_executable = (argc == 7) ? argv[6] : "yosys"; // Default to "yosys" if not provided
 
+        auto pipeline_start_time = std::chrono::high_resolution_clock::now();
+
         fs::path run_dir(run_dir_str);
         fs::create_directories(run_dir); // Ensure run_dir exists
 
         // 1. Convert main JSON to component Verilog files and manifest.json
         cout << "Step 1: Converting JSON to component Verilog files..." << endl;
+        auto step1_start_time = std::chrono::high_resolution_clock::now();
         int conv_ret = json_v_converter(constraint_json_path, run_dir_str);
+        auto step1_end_time = std::chrono::high_resolution_clock::now();
+        auto step1_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step1_end_time - step1_start_time);
+        cout << "Step 1 (json_v_converter) took: " << step1_duration.count() << " ms." << endl;
+
         if (conv_ret == 1) { // General error
             cerr << "Error in json_v_converter." << endl;
             return 1;
@@ -104,6 +113,11 @@ int main(int argc, char *argv[]) {
             // 2. For each component: Verilog -> AIG -> BDD solve
             json components_array = manifest_data.value("components", json::array());
             cout << "Step 2: Processing " << components_array.size() << " components..." << endl;
+            auto step2_start_time = std::chrono::high_resolution_clock::now();
+            long long total_yosys_time_ms = 0;
+            long long total_aig_parsing_solver_ms = 0;
+            long long total_bdd_construction_solver_ms = 0;
+            long long total_sampling_solver_ms = 0;
 
             for (const auto& comp_entry : components_array) {
                 string comp_v_file_name = comp_entry["verilog_file"].get<string>();
@@ -134,18 +148,18 @@ int main(int argc, char *argv[]) {
 
                 // 2a. Verilog to AIG (using Yosys)
                 cout << "    Converting " << comp_v_path.filename() << " to AIG..." << endl;
+                auto yosys_call_start_time = std::chrono::high_resolution_clock::now();
                 string yosys_script = "read_verilog " + comp_v_path.string() +
                                       "; synth -top " + comp_entry["verilog_file"].get<string>().substr(0, comp_entry["verilog_file"].get<string>().find_last_of('.')) +
                                       "; abc; aigmap; opt; clean; write_aiger -ascii " + comp_aig_path.string() + ";";
                 string yosys_command = yosys_executable + " -q -p \"" + yosys_script + "\"";
-                
-                // cout << "    Yosys command: " << yosys_command << endl;
                 int yosys_ret = system(yosys_command.c_str());
+                auto yosys_call_end_time = std::chrono::high_resolution_clock::now();
+                auto yosys_call_duration = std::chrono::duration_cast<std::chrono::milliseconds>(yosys_call_end_time - yosys_call_start_time);
+                total_yosys_time_ms += yosys_call_duration.count();
+
                 if (yosys_ret != 0) {
                     cerr << "Error: Yosys conversion failed for " << comp_v_path << endl;
-                    // Decide if this is fatal for the whole run or just this component
-                    // For now, let's assume it means this component is unsolvable or problematic
-                    // The merger should detect a missing result file.
                     continue; // Skip to next component
                 }
 
@@ -193,11 +207,19 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 
-                int bdd_ret = aig_to_bdd_solver(comp_aig_path.string(), 
-                                                temp_comp_vars_json_path.string(), 
-                                                samples_for_this_component, 
-                                                comp_result_path.string(), 
-                                                random_seed + comp_id); // Vary seed per component
+                std::pair<int, SolverDetailedTimings> solver_result = aig_to_bdd_solver(
+                                                                        comp_aig_path.string(), 
+                                                                        temp_comp_vars_json_path.string(), 
+                                                                        samples_for_this_component, 
+                                                                        comp_result_path.string(), 
+                                                                        random_seed + comp_id);
+                int bdd_ret = solver_result.first;
+                const SolverDetailedTimings& comp_timings = solver_result.second;
+
+                total_aig_parsing_solver_ms += comp_timings.aig_parsing_ms;
+                total_bdd_construction_solver_ms += comp_timings.bdd_construction_ms;
+                total_sampling_solver_ms += comp_timings.sampling_ms;
+                                
                 if (bdd_ret != 0) {
                     cerr << "Warning: aig_to_bdd_solver failed for component " << comp_id 
                          << ". Result file might be empty or indicate no solution." << endl;
@@ -205,18 +227,33 @@ int main(int argc, char *argv[]) {
                 }
                  fs::remove(temp_comp_vars_json_path); // Clean up temp file
             }
+            auto step2_end_time = std::chrono::high_resolution_clock::now();
+            auto step2_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step2_end_time - step2_start_time);
+            cout << "Step 2 (Component Processing Loop) took: " << step2_duration.count() << " ms." << endl;
+            cout << "  Total Yosys (Verilog to AIG) time: " << total_yosys_time_ms << " ms." << endl;
+            cout << "  Total AIG parsing (in solver) time: " << total_aig_parsing_solver_ms << " ms." << endl;
+            cout << "  Total BDD construction (in solver) time: " << total_bdd_construction_solver_ms << " ms." << endl;
+            cout << "  Total BDD sampling (in solver) time: " << total_sampling_solver_ms << " ms." << endl;
         }
 
         // 3. Merge results
         cout << "Step 3: Merging component results..." << endl;
+        auto step3_start_time = std::chrono::high_resolution_clock::now();
         fs::path final_result_json_path = run_dir / "result.json";
         int merge_ret = merge_bdd_results(manifest_path.string(), final_result_json_path.string(), num_samples, random_seed);
+        auto step3_end_time = std::chrono::high_resolution_clock::now();
+        auto step3_duration = std::chrono::duration_cast<std::chrono::milliseconds>(step3_end_time - step3_start_time);
+        cout << "Step 3 (merge_bdd_results) took: " << step3_duration.count() << " ms." << endl;
+
         if (merge_ret != 0) {
             cerr << "Error in results_merger." << endl;
             return 1;
         }
         
+        auto pipeline_end_time = std::chrono::high_resolution_clock::now();
+        auto pipeline_duration = std::chrono::duration_cast<std::chrono::milliseconds>(pipeline_end_time - pipeline_start_time);
         cout << "Solve-decomposed finished. Final results in " << final_result_json_path << endl;
+        cout << "Total pipeline time for solve-decomposed: " << pipeline_duration.count() << " ms." << endl;
         return 0;
 
     } else {

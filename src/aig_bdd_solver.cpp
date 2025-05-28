@@ -11,6 +11,7 @@
 #include <map>
 #include <quadmath.h>
 #include <cmath>
+#include <utility>
 
 namespace std {
 inline __float128 nextafter(__float128 __x, __float128 __y) {
@@ -489,11 +490,14 @@ cleanup_cudd_resources(DdManager *manager, DdNode *bdd_circuit_output,
             cudd_cleanup_end_time - cudd_cleanup_start_time);
 }
 
-int aig_to_bdd_solver(const string &aig_file_path,
-                      const string &original_json_path, int num_samples,
-                      const string &result_json_path,
-                      unsigned int random_seed) {
+std::pair<int, SolverDetailedTimings> aig_to_bdd_solver(
+    const string &aig_file_path, const string &original_json_path,
+    int num_samples, const string &result_json_path,
+    unsigned int random_seed) {
+    
+    SolverDetailedTimings timings;
     auto function_start_time = std::chrono::high_resolution_clock::now();
+    
     rng.seed(random_seed);
     DdManager *manager = nullptr;
     DdNode *bdd_circuit_output = nullptr;
@@ -501,9 +505,11 @@ int aig_to_bdd_solver(const string &aig_file_path,
     std::map<int, DdNode *> literal_to_bdd_map;
     std::vector<DdNode *> input_vars_bdd;
     std::map<int, int> cudd_idx_to_original_aig_pi_file_idx;
+    
     manager = initialize_cudd_manager();
-    if (!manager)
-        return 1;
+    if (!manager) {
+        return std::make_pair(1, timings);
+    }
 
     literal_to_bdd_map[0] = Cudd_ReadLogicZero(manager);
     literal_to_bdd_map[1] = Cudd_ReadOne(manager);
@@ -511,37 +517,57 @@ int aig_to_bdd_solver(const string &aig_file_path,
     std::ifstream aig_file_stream(aig_file_path);
     if (!aig_file_stream.is_open()) {
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+
+    auto aig_header_parse_start_time = std::chrono::high_resolution_clock::now();
     if (!parse_aig_header(aig_file_stream, aig_data)) {
         aig_file_stream.close();
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    auto aig_header_parse_end_time = std::chrono::high_resolution_clock::now();
+    timings.aig_parsing_ms += std::chrono::duration_cast<std::chrono::milliseconds>(aig_header_parse_end_time - aig_header_parse_start_time).count();
+
+    auto aig_preread_start_time = std::chrono::high_resolution_clock::now();
     if (!read_aig_structure(aig_file_stream, aig_data)) {
         aig_file_stream.close();
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    auto aig_preread_end_time = std::chrono::high_resolution_clock::now();
+    timings.aig_parsing_ms += std::chrono::duration_cast<std::chrono::milliseconds>(aig_preread_end_time - aig_preread_start_time).count();
     aig_file_stream.close();
+
+    auto var_order_start_time = std::chrono::high_resolution_clock::now();
+    auto bdd_var_creation_overall_start_time = std::chrono::high_resolution_clock::now();
     if (!create_bdd_variables(manager, aig_data, literal_to_bdd_map,
                               input_vars_bdd,
                               cudd_idx_to_original_aig_pi_file_idx)) {
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    auto bdd_var_creation_overall_end_time = std::chrono::high_resolution_clock::now();
+    timings.bdd_construction_ms += std::chrono::duration_cast<std::chrono::milliseconds>(bdd_var_creation_overall_end_time - bdd_var_creation_overall_start_time).count();
+
+    auto and_gate_processing_start_time = std::chrono::high_resolution_clock::now();
     if (!build_bdd_for_and_gates(manager, aig_data, literal_to_bdd_map)) {
         cleanup_cudd_resources(manager, nullptr, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    auto and_gate_processing_end_time = std::chrono::high_resolution_clock::now();
+    timings.bdd_construction_ms += std::chrono::duration_cast<std::chrono::milliseconds>(and_gate_processing_end_time - and_gate_processing_start_time).count();
+    
+    auto get_output_bdd_start_time = std::chrono::high_resolution_clock::now();
     bdd_circuit_output =
         get_final_bdd_output(manager, aig_data, literal_to_bdd_map);
     if (!bdd_circuit_output) {
         cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
-    auto original_json_read_start_time =
-        std::chrono::high_resolution_clock::now();
+    auto get_output_bdd_end_time = std::chrono::high_resolution_clock::now();
+    timings.bdd_construction_ms += std::chrono::duration_cast<std::chrono::milliseconds>(get_output_bdd_end_time - get_output_bdd_start_time).count();
+
     ifstream original_json_stream(original_json_path);
     json original_data;
     if (original_json_stream.is_open()) {
@@ -551,12 +577,9 @@ int aig_to_bdd_solver(const string &aig_file_path,
     json original_variable_list = original_data.contains("variable_list")
                                       ? original_data["variable_list"]
                                       : json::array();
-    auto original_json_read_end_time =
-        std::chrono::high_resolution_clock::now();
-    auto original_json_read_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            original_json_read_end_time - original_json_read_start_time);
+    
     json assignment_list;
+    auto sampling_total_start_time = std::chrono::high_resolution_clock::now();
     try {
         assignment_list = perform_bdd_sampling(
             manager, bdd_circuit_output, num_samples, aig_data.nI,
@@ -564,20 +587,21 @@ int aig_to_bdd_solver(const string &aig_file_path,
             cudd_idx_to_original_aig_pi_file_idx);
     } catch (const std::runtime_error &e) {
         cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    auto sampling_total_end_time = std::chrono::high_resolution_clock::now();
+    timings.sampling_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sampling_total_end_time - sampling_total_start_time).count();
+
     if (!format_and_write_results(result_json_path, assignment_list)) {
         cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-        return 1;
+        return std::make_pair(1, timings);
     }
+    
     cleanup_cudd_resources(manager, bdd_circuit_output, literal_to_bdd_map);
-    manager = nullptr;
+    manager = nullptr; 
     bdd_circuit_output = nullptr;
-    auto function_end_time = std::chrono::high_resolution_clock::now();
-    auto function_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            function_end_time - function_start_time);
-    return 0;
+    
+    return std::make_pair(0, timings);
 }
 
 string to_hex_string(unsigned long long value, int bit_width) {
