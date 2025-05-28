@@ -174,7 +174,7 @@ int main(int argc, char *argv[]) {
                 if (effective_components_for_sampling > 0 && num_samples > 0) {
                     // Calculate N^(1/k) where N = num_samples, k = effective_components_for_sampling
                     double base_samples = std::pow(static_cast<double>(num_samples), 1.0 / static_cast<double>(effective_components_for_sampling));
-                    samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 100;
+                    samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 50;
                     
                     // Ensure minimum samples for edge cases
                     if (samples_for_this_component < 1) {

@@ -322,6 +322,23 @@ struct DSUComponent {
     std::set<int> pi_var_ids_in_component; // Original PI IDs
 };
 
+// New structure for sorting DSU components when merging into a single file
+struct DSUComponentSortInfo {
+    int root_representative_constraint_idx;
+    size_t size_metric; // Number of constraints in this DSU component
+    std::vector<std::string> effective_wire_names_from_this_dsu;
+    bool this_dsu_makes_problem_unsat;
+    bool this_dsu_is_trivial_sat; // All constraints in this DSU are 1'b1 or it's empty and not unsat
+
+    // Comparison for sorting
+    bool operator<(const DSUComponentSortInfo& other) const {
+        if (size_metric != other.size_metric) {
+            return size_metric < other.size_metric;
+        }
+        return root_representative_constraint_idx < other.root_representative_constraint_idx;
+    }
+};
+
 
 int json_v_converter(const string &input_json_path,
                      const string &output_v_dir_str) { // Changed output_v_dir to output_v_dir_str
@@ -474,116 +491,259 @@ int json_v_converter(const string &input_json_path,
     manifest_json["components"] = json::array();
     manifest_json["unsat_by_preprocessing"] = false;
 
-    int component_file_idx = 0;
-    bool overall_problem_is_unsat = false;
+    int component_id_counter = 0; // Used for generating component IDs and counting
+    bool global_problem_is_unsat_by_preproc = false;
 
-    for (auto &pair_root_component : dsu_components_map) {
-        DSUComponent &component = pair_root_component.second;
-        std::vector<string> component_v_lines;
-        std::string component_module_name = "component_" + to_string(component_file_idx);
-        
-        component_v_lines.push_back("module " + component_module_name + "(");
-        
-        json component_manifest_entry;
-        component_manifest_entry["id"] = component_file_idx;
-        component_manifest_entry["verilog_file"] = component_module_name + ".v";
-        component_manifest_entry["aig_file"] = component_module_name + ".aag"; // Placeholder
-        component_manifest_entry["result_json_file"] = component_module_name + "_results.json"; // Placeholder
-        component_manifest_entry["primary_inputs"] = json::array();
-        component_manifest_entry["is_trivial_sat"] = false;
-        component_manifest_entry["is_trivial_unsat"] = false;
 
-        std::vector<string> input_declarations;
-        std::set<int> sorted_pi_ids(component.pi_var_ids_in_component.begin(), component.pi_var_ids_in_component.end());
+    if (dsu_components_map.size() < 8 && !dsu_components_map.empty()) {
+        // --- SINGLE VERILOG FILE LOGIC ---
+        std::string single_component_module_name = "component_0";
+        json single_component_manifest_entry;
+        single_component_manifest_entry["id"] = 0;
+        single_component_manifest_entry["verilog_file"] = single_component_module_name + ".v";
+        single_component_manifest_entry["aig_file"] = single_component_module_name + ".aag";
+        single_component_manifest_entry["result_json_file"] = single_component_module_name + "_results.json";
+        single_component_manifest_entry["primary_inputs"] = json::array();
+        single_component_manifest_entry["is_trivial_sat"] = false;
+        single_component_manifest_entry["is_trivial_unsat"] = false;
 
-        for (int pi_id : sorted_pi_ids) {
+        std::vector<string> single_verilog_lines;
+        single_verilog_lines.push_back("module " + single_component_module_name + "(");
+
+        std::set<int> all_pi_ids_for_merged_component;
+        std::vector<DSUComponentSortInfo> dsu_sort_list;
+        std::vector<string> merged_input_declarations;
+        std::vector<string> merged_constraint_wire_declarations;
+        std::vector<string> merged_constraint_assign_statements;
+
+        for (auto const& [root_idx, dsu_comp_obj] : dsu_components_map) {
+            DSUComponentSortInfo current_dsu_sort_info;
+            current_dsu_sort_info.root_representative_constraint_idx = dsu_comp_obj.root_representative_constraint_idx;
+            current_dsu_sort_info.size_metric = dsu_comp_obj.constraint_unique_ids_in_component.size();
+            current_dsu_sort_info.this_dsu_makes_problem_unsat = false;
+            int effective_constraints_in_this_dsu = 0;
+
+            for (int pi_id : dsu_comp_obj.pi_var_ids_in_component) {
+                all_pi_ids_for_merged_component.insert(pi_id);
+            }
+
+            for (int constraint_unique_id : dsu_comp_obj.constraint_unique_ids_in_component) {
+                const auto& cnstr_info = all_constraints_info[constraint_unique_id];
+                merged_constraint_wire_declarations.push_back("    wire " + cnstr_info.assigned_wire_name + ";");
+
+                if (cnstr_info.determined_wire_value.has_value()) {
+                    if (!cnstr_info.determined_wire_value.value()) { // Constraint is 1'b0
+                        merged_constraint_assign_statements.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b0;");
+                        current_dsu_sort_info.this_dsu_makes_problem_unsat = true;
+                        global_problem_is_unsat_by_preproc = true;
+                    } else { // Constraint is 1'b1
+                        merged_constraint_assign_statements.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b1;");
+                    }
+                } else {
+                    merged_constraint_assign_statements.push_back("    assign " + cnstr_info.assigned_wire_name + " = |(" + cnstr_info.verilog_expression_body + ");");
+                    current_dsu_sort_info.effective_wire_names_from_this_dsu.push_back(cnstr_info.assigned_wire_name);
+                    effective_constraints_in_this_dsu++;
+                }
+            }
+            current_dsu_sort_info.this_dsu_is_trivial_sat = (!current_dsu_sort_info.this_dsu_makes_problem_unsat && effective_constraints_in_this_dsu == 0);
+            dsu_sort_list.push_back(current_dsu_sort_info);
+        }
+
+        std::sort(dsu_sort_list.begin(), dsu_sort_list.end());
+
+        // Populate manifest PIs and Verilog input declarations
+        std::set<int> sorted_merged_pi_ids(all_pi_ids_for_merged_component.begin(), all_pi_ids_for_merged_component.end());
+        for (int pi_id : sorted_merged_pi_ids) {
             if (var_id_to_info_map.count(pi_id)) {
                 const auto& var_info = var_id_to_info_map[pi_id];
                 string original_name = var_info["name"];
                 int bit_width = var_info["bit_width"];
-                string verilog_var_name = "var_" + to_string(pi_id); // Consistent naming
+                string verilog_var_name = "var_" + to_string(pi_id);
 
-                input_declarations.push_back("    input wire [" + to_string(bit_width - 1) + ":0] " + verilog_var_name);
+                merged_input_declarations.push_back("    input wire [" + to_string(bit_width - 1) + ":0] " + verilog_var_name);
                 
                 json pi_manifest_entry;
                 pi_manifest_entry["original_json_id"] = pi_id;
                 pi_manifest_entry["original_name"] = original_name;
                 pi_manifest_entry["bit_width"] = bit_width;
-                pi_manifest_entry["local_name_in_verilog"] = verilog_var_name;
-                component_manifest_entry["primary_inputs"].push_back(pi_manifest_entry);
-            } else {
-                 cerr << "Warning: PI ID " << pi_id << " found in constraint but not in variable_list. Skipping for component " << component_file_idx << "." << endl;
+                pi_manifest_entry["local_name_in_verilog"] = verilog_var_name; // For consistency
+                single_component_manifest_entry["primary_inputs"].push_back(pi_manifest_entry);
             }
         }
 
-        for (const auto& decl : input_declarations) {
-            component_v_lines.push_back(decl + ",");
+        for (const auto& decl : merged_input_declarations) {
+            single_verilog_lines.push_back(decl + ",");
         }
-        component_v_lines.push_back("    output wire result");
-        component_v_lines.push_back(");");
-        component_v_lines.push_back(""); // Blank line
+        single_verilog_lines.push_back("    output wire result");
+        single_verilog_lines.push_back(");");
+        single_verilog_lines.push_back(""); 
 
-        std::vector<string> constraint_wire_names_for_component_result;
-        bool component_is_unsat = false;
-        int effective_constraints_in_component = 0;
+        for (const auto& decl : merged_constraint_wire_declarations) {
+            single_verilog_lines.push_back(decl);
+        }
+        single_verilog_lines.push_back("");
+        for (const auto& assign_stmt : merged_constraint_assign_statements) {
+            single_verilog_lines.push_back(assign_stmt);
+        }
+        single_verilog_lines.push_back("");
 
-        for (int constraint_unique_id : component.constraint_unique_ids_in_component) {
-            const auto& cnstr_info = all_constraints_info[constraint_unique_id]; // unique_id is the index
-            component_v_lines.push_back("    wire " + cnstr_info.assigned_wire_name + ";");
-            if (cnstr_info.determined_wire_value.has_value()) {
-                if (!cnstr_info.determined_wire_value.value()) { // Constraint is 1'b0
-                    component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b0;");
-                    component_is_unsat = true; // This component (and thus whole problem) is UNSAT
-                    // We still write the Verilog, but manifest will mark it.
-                } else { // Constraint is 1'b1
-                    component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b1;");
-                    // This constraint is true, don't add its wire to the final AND unless it's the only one
+        std::vector<string> final_and_terms_ordered;
+        if (!global_problem_is_unsat_by_preproc) {
+            for (const auto& sorted_dsu_info : dsu_sort_list) {
+                if (sorted_dsu_info.this_dsu_makes_problem_unsat) {
+                    // This case should already set global_problem_is_unsat_by_preproc
+                    break; 
                 }
-            } else {
-                component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = |(" + cnstr_info.verilog_expression_body + ");");
-                constraint_wire_names_for_component_result.push_back(cnstr_info.assigned_wire_name);
-                effective_constraints_in_component++;
+                if (!sorted_dsu_info.this_dsu_is_trivial_sat) {
+                    final_and_terms_ordered.insert(final_and_terms_ordered.end(), 
+                                                   sorted_dsu_info.effective_wire_names_from_this_dsu.begin(),
+                                                   sorted_dsu_info.effective_wire_names_from_this_dsu.end());
+                }
             }
         }
-        component_v_lines.push_back(""); // Blank line
-
-        if (component_is_unsat) {
-            component_v_lines.push_back("    assign result = 1'b0;");
-            overall_problem_is_unsat = true;
-            component_manifest_entry["is_trivial_unsat"] = true;
-        } else if (constraint_wire_names_for_component_result.empty()) {
-            // All constraints were 1'b1 or no effective constraints
-            component_v_lines.push_back("    assign result = 1'b1;");
-            component_manifest_entry["is_trivial_sat"] = true;
+        
+        if (global_problem_is_unsat_by_preproc) {
+            single_verilog_lines.push_back("    assign result = 1'b0;");
+            single_component_manifest_entry["is_trivial_unsat"] = true;
+        } else if (final_and_terms_ordered.empty()) {
+            single_verilog_lines.push_back("    assign result = 1'b1;");
+            single_component_manifest_entry["is_trivial_sat"] = true;
         } else {
             string result_assign_line = "    assign result = ";
-            for (size_t i = 0; i < constraint_wire_names_for_component_result.size(); ++i) {
-                result_assign_line += constraint_wire_names_for_component_result[i];
-                if (i < constraint_wire_names_for_component_result.size() - 1) {
+            for (size_t i = 0; i < final_and_terms_ordered.size(); ++i) {
+                result_assign_line += final_and_terms_ordered[i];
+                if (i < final_and_terms_ordered.size() - 1) {
                     result_assign_line += " & ";
                 }
             }
             result_assign_line += ";";
-            component_v_lines.push_back(result_assign_line);
+            single_verilog_lines.push_back(result_assign_line);
         }
-        
-        component_v_lines.push_back("endmodule");
+        single_verilog_lines.push_back("endmodule");
 
-        // Write component Verilog file
-        filesystem::path component_v_path = output_v_dir / (component_module_name + ".v");
-        ofstream component_v_stream(component_v_path);
-        if (!component_v_stream.is_open()) {
-            cerr << "Error: Cannot open component Verilog file for writing: " << component_v_path << endl;
-            // Continue to next component, but problem is likely
+        filesystem::path single_component_v_path = output_v_dir / (single_component_module_name + ".v");
+        ofstream single_component_v_stream(single_component_v_path);
+        if (!single_component_v_stream.is_open()) {
+            cerr << "Error: Cannot open merged Verilog file for writing: " << single_component_v_path << endl;
+            return 1; // Critical failure
         } else {
-            for (const string &line : component_v_lines) {
-                component_v_stream << line << endl;
+            for (const string &line : single_verilog_lines) {
+                single_component_v_stream << line << endl;
             }
-            component_v_stream.close();
+            single_component_v_stream.close();
         }
-        manifest_json["components"].push_back(component_manifest_entry);
-        component_file_idx++;
-    }
+        manifest_json["components"].push_back(single_component_manifest_entry);
+        component_id_counter = 1; // We generated one component file
+
+    } else { // Existing logic for >= 8 components or 0 components
+        for (auto &pair_root_component : dsu_components_map) {
+            DSUComponent &component = pair_root_component.second;
+            std::vector<string> component_v_lines;
+            std::string component_module_name = "component_" + to_string(component_id_counter);
+            
+            component_v_lines.push_back("module " + component_module_name + "(");
+            
+            json component_manifest_entry;
+            component_manifest_entry["id"] = component_id_counter;
+            component_manifest_entry["verilog_file"] = component_module_name + ".v";
+            component_manifest_entry["aig_file"] = component_module_name + ".aag"; // Placeholder
+            component_manifest_entry["result_json_file"] = component_module_name + "_results.json"; // Placeholder
+            component_manifest_entry["primary_inputs"] = json::array();
+            component_manifest_entry["is_trivial_sat"] = false;
+            component_manifest_entry["is_trivial_unsat"] = false;
+
+            std::vector<string> input_declarations;
+            std::set<int> sorted_pi_ids(component.pi_var_ids_in_component.begin(), component.pi_var_ids_in_component.end());
+
+            for (int pi_id : sorted_pi_ids) {
+                if (var_id_to_info_map.count(pi_id)) {
+                    const auto& var_info = var_id_to_info_map[pi_id];
+                    string original_name = var_info["name"];
+                    int bit_width = var_info["bit_width"];
+                    string verilog_var_name = "var_" + to_string(pi_id); // Consistent naming
+
+                    input_declarations.push_back("    input wire [" + to_string(bit_width - 1) + ":0] " + verilog_var_name);
+                    
+                    json pi_manifest_entry;
+                    pi_manifest_entry["original_json_id"] = pi_id;
+                    pi_manifest_entry["original_name"] = original_name;
+                    pi_manifest_entry["bit_width"] = bit_width;
+                    pi_manifest_entry["local_name_in_verilog"] = verilog_var_name;
+                    component_manifest_entry["primary_inputs"].push_back(pi_manifest_entry);
+                } else {
+                     cerr << "Warning: PI ID " << pi_id << " found in constraint but not in variable_list. Skipping for component " << component_id_counter << "." << endl;
+                }
+            }
+
+            for (const auto& decl : input_declarations) {
+                component_v_lines.push_back(decl + ",");
+            }
+            component_v_lines.push_back("    output wire result");
+            component_v_lines.push_back(");");
+            component_v_lines.push_back(""); // Blank line
+
+            std::vector<string> constraint_wire_names_for_component_result;
+            bool component_is_unsat = false;
+            int effective_constraints_in_component = 0;
+
+            for (int constraint_unique_id : component.constraint_unique_ids_in_component) {
+                const auto& cnstr_info = all_constraints_info[constraint_unique_id]; // unique_id is the index
+                component_v_lines.push_back("    wire " + cnstr_info.assigned_wire_name + ";");
+                if (cnstr_info.determined_wire_value.has_value()) {
+                    if (!cnstr_info.determined_wire_value.value()) { // Constraint is 1'b0
+                        component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b0;");
+                        component_is_unsat = true; // This component (and thus whole problem) is UNSAT
+                        // We still write the Verilog, but manifest will mark it.
+                    } else { // Constraint is 1'b1
+                        component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = 1'b1;");
+                        // This constraint is true, don't add its wire to the final AND unless it's the only one
+                    }
+                } else {
+                    component_v_lines.push_back("    assign " + cnstr_info.assigned_wire_name + " = |(" + cnstr_info.verilog_expression_body + ");");
+                    constraint_wire_names_for_component_result.push_back(cnstr_info.assigned_wire_name);
+                    effective_constraints_in_component++;
+                }
+            }
+            component_v_lines.push_back(""); // Blank line
+
+            if (component_is_unsat) {
+                component_v_lines.push_back("    assign result = 1'b0;");
+                global_problem_is_unsat_by_preproc = true; // Update global flag
+                component_manifest_entry["is_trivial_unsat"] = true;
+            } else if (constraint_wire_names_for_component_result.empty()) {
+                // All constraints were 1'b1 or no effective constraints
+                component_v_lines.push_back("    assign result = 1'b1;");
+                component_manifest_entry["is_trivial_sat"] = true;
+            } else {
+                string result_assign_line = "    assign result = ";
+                for (size_t i = 0; i < constraint_wire_names_for_component_result.size(); ++i) {
+                    result_assign_line += constraint_wire_names_for_component_result[i];
+                    if (i < constraint_wire_names_for_component_result.size() - 1) {
+                        result_assign_line += " & ";
+                    }
+                }
+                result_assign_line += ";";
+                component_v_lines.push_back(result_assign_line);
+            }
+            
+            component_v_lines.push_back("endmodule");
+
+            // Write component Verilog file
+            filesystem::path component_v_path = output_v_dir / (component_module_name + ".v");
+            ofstream component_v_stream(component_v_path);
+            if (!component_v_stream.is_open()) {
+                cerr << "Error: Cannot open component Verilog file for writing: " << component_v_path << endl;
+                // Continue to next component, but problem is likely
+            } else {
+                for (const string &line : component_v_lines) {
+                    component_v_stream << line << endl;
+                }
+                component_v_stream.close();
+            }
+            manifest_json["components"].push_back(component_manifest_entry);
+            component_id_counter++;
+        }
+    } // End of "else" for multiple files or empty dsu_components_map
     
     // Handle PIs not used in any constraint (these are "don't cares" for satisfiability)
     manifest_json["global_variables_not_in_any_component"] = json::array();
@@ -601,11 +761,11 @@ int json_v_converter(const string &input_json_path,
     }
 
 
-    if (overall_problem_is_unsat) {
+    if (global_problem_is_unsat_by_preproc) {
         manifest_json["unsat_by_preprocessing"] = true;
         cout << "Info: Problem determined to be UNSAT during preprocessing by json_v_converter." << endl;
     }
-    manifest_json["num_components"] = component_file_idx;
+    manifest_json["num_components"] = component_id_counter; // Use the counter
 
 
     // Write manifest.json
@@ -618,9 +778,9 @@ int json_v_converter(const string &input_json_path,
     manifest_stream << manifest_json.dump(4) << endl;
     manifest_stream.close();
 
-    cout << "json_v_converter finished. Generated " << component_file_idx 
+    cout << "json_v_converter finished. Generated " << component_id_counter 
          << " component Verilog file(s) and manifest.json in " << output_v_dir_str << endl;
-    if (overall_problem_is_unsat) {
+    if (global_problem_is_unsat_by_preproc) {
         return 2; // Special return code for UNSAT detected by preprocessor
     }
 
