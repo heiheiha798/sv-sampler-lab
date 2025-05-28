@@ -157,11 +157,35 @@ int main(int argc, char *argv[]) {
 
                 // 2c. AIG to BDD solve
                 cout << "    Solving AIG for component " << comp_id << "..." << endl;
-                // For decomposed problems, each component might need fewer samples,
-                // but for simplicity, let's pass the total num_samples for now.
-                // The merger can decide how many to pick.
-                // A more advanced strategy would be num_samples_per_component = ceil(pow(num_samples, 1.0/num_components_effective))
-                int samples_for_this_component = num_samples; // Simplification
+                int samples_for_this_component;
+                
+                // Calculate samples based on N^(1/k) + 100 strategy
+                // Only exclude trivial_unsat components from k calculation
+                int total_components = components_array.size();
+                int effective_components_for_sampling = 0;
+                
+                // Count components that can contribute to sampling (exclude only trivial_unsat)
+                for (const auto& comp : components_array) {
+                    if (!comp.value("is_trivial_unsat", false)) {
+                        effective_components_for_sampling++;
+                    }
+                }
+                
+                if (effective_components_for_sampling > 0 && num_samples > 0) {
+                    // Calculate N^(1/k) where N = num_samples, k = effective_components_for_sampling
+                    double base_samples = std::pow(static_cast<double>(num_samples), 1.0 / static_cast<double>(effective_components_for_sampling));
+                    samples_for_this_component = static_cast<int>(std::ceil(base_samples)) + 100;
+                    
+                    // Ensure minimum samples for edge cases
+                    if (samples_for_this_component < 1) {
+                        samples_for_this_component = 1;
+                    }
+                } else if (num_samples == 0) {
+                    samples_for_this_component = 0;
+                } else {
+                    // Fallback: should not happen if we have valid components
+                    samples_for_this_component = 100;
+                }
                 
                 int bdd_ret = aig_to_bdd_solver(comp_aig_path.string(), 
                                                 temp_comp_vars_json_path.string(), 

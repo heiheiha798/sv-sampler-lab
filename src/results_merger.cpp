@@ -244,7 +244,18 @@ int merge_bdd_results(const string &manifest_path_str,
             if (current_full_assignment_map.contains(to_string(current_var_original_id))) {
                 hex_value_str = current_full_assignment_map[to_string(current_var_original_id)].get<string>();
             } else {
-                hex_value_str = to_hex_string(0, var_spec["bit_width"].get<int>()); // Use "bit_width" from var_spec
+                int bit_width = var_spec["bit_width"].get<int>();
+                unsigned long long random_val = 0;
+                if (bit_width > 0) {
+                    std::uniform_int_distribution<unsigned long long> dist_val;
+                    if (bit_width < 64) {
+                        dist_val = std::uniform_int_distribution<unsigned long long>(0, (1ULL << bit_width) - 1);
+                    } else { // bit_width == 64
+                        dist_val = std::uniform_int_distribution<unsigned long long>(0, ULLONG_MAX);
+                    }
+                    random_val = dist_val(merge_rng); // Use the rng specific to merger
+                }
+                hex_value_str = to_hex_string(random_val, bit_width);
             }
             final_assignment_entry.push_back({{"value", hex_value_str}});
             current_signature_str += hex_value_str + ";";
