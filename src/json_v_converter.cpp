@@ -333,7 +333,7 @@ struct DSUComponentSortInfo {
     // Comparison for sorting
     bool operator<(const DSUComponentSortInfo& other) const {
         if (size_metric != other.size_metric) {
-            return size_metric < other.size_metric;
+            return size_metric < other.size_metric; // Old: smaller size_metric first
         }
         return root_representative_constraint_idx < other.root_representative_constraint_idx;
     }
@@ -520,14 +520,17 @@ int json_v_converter(const string &input_json_path,
             DSUComponentSortInfo current_dsu_sort_info;
             current_dsu_sort_info.root_representative_constraint_idx = dsu_comp_obj.root_representative_constraint_idx;
             current_dsu_sort_info.this_dsu_makes_problem_unsat = false;
-            int effective_constraints_in_this_dsu = 0;
+            // int effective_constraints_in_this_dsu = 0; // Original line for new metric
             std::vector<std::string> temp_effective_wire_names_for_this_dsu;
 
             for (int pi_id : dsu_comp_obj.pi_var_ids_in_component) {
                 all_pi_ids_for_merged_component.insert(pi_id);
             }
+            
+            int current_dsu_total_constraints = 0; // For the old metric
 
             for (int constraint_unique_id : dsu_comp_obj.constraint_unique_ids_in_component) {
+                current_dsu_total_constraints++; // Count all constraints in this DSU component
                 const auto& cnstr_info = all_constraints_info[constraint_unique_id];
                 merged_constraint_wire_declarations.push_back("    wire " + cnstr_info.assigned_wire_name + ";");
 
@@ -542,19 +545,25 @@ int json_v_converter(const string &input_json_path,
                 } else {
                     merged_constraint_assign_statements.push_back("    assign " + cnstr_info.assigned_wire_name + " = |(" + cnstr_info.verilog_expression_body + ");");
                     temp_effective_wire_names_for_this_dsu.push_back(cnstr_info.assigned_wire_name);
-                    effective_constraints_in_this_dsu++;
+                    // effective_constraints_in_this_dsu++; // Original line for new metric
                 }
             }
-            current_dsu_sort_info.size_metric = effective_constraints_in_this_dsu;
+            // MODIFICATION: Use total number of constraints in the DSU component for size_metric
+            current_dsu_sort_info.size_metric = dsu_comp_obj.constraint_unique_ids_in_component.size(); 
+            
             current_dsu_sort_info.effective_wire_names_from_this_dsu = temp_effective_wire_names_for_this_dsu;
-            current_dsu_sort_info.this_dsu_is_trivial_sat = (!current_dsu_sort_info.this_dsu_makes_problem_unsat && effective_constraints_in_this_dsu == 0);
+            // Trivial sat check should still be based on effective (non-constant true) wires and not making problem unsat
+            bool has_effective_non_constant_wires = !temp_effective_wire_names_for_this_dsu.empty();
+            current_dsu_sort_info.this_dsu_is_trivial_sat = (!current_dsu_sort_info.this_dsu_makes_problem_unsat && !has_effective_non_constant_wires);
+
             dsu_sort_list.push_back(current_dsu_sort_info);
         }
 
         std::sort(dsu_sort_list.begin(), dsu_sort_list.end());
 
         // Populate manifest PIs and Verilog input declarations
-        std::set<int> sorted_merged_pi_ids(all_pi_ids_for_merged_component.begin(), all_pi_ids_for_merged_component.end());
+        std::set<int> sorted_merged_pi_ids(all_pi_ids_for_merged_component.begin(), all_pi_ids_for_merged_component.end()); // OLD
+        // std::set<int> sorted_merged_pi_ids(all_pi_ids_from_variable_list.begin(), all_pi_ids_from_variable_list.end()); // NEW
         for (int pi_id : sorted_merged_pi_ids) {
             if (var_id_to_info_map.count(pi_id)) {
                 const auto& var_info = var_id_to_info_map[pi_id];
