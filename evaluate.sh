@@ -8,6 +8,7 @@ run() {
 
     local start_time=$(date +%s%N)
     timeout $tlim ./run.sh ${cnstr_file} 1000 ${run_dir} ${seed} 2>&1 > /dev/null
+    # timeout $tlim ./run.sh ${cnstr_file} 1000 ${run_dir} ${seed} 2>&1 > ./output_log.log
     local retcode=$?
     local end_time=$(date +%s%N)
 

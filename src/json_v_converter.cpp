@@ -1,5 +1,5 @@
 #include "nlohmann/json.hpp"
-#include "solver_functions.h" // For JVC_ constants
+#include "solver_functions.h" 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,16 +16,14 @@ using json = nlohmann::json;
 using namespace std;
 using namespace std::filesystem;
 
-// Define constants (could be in solver_functions.h if used by main directly,
-// but typically they are an internal detail of the function using them,
-// communicated via the output parameter)
 const int JVC_INTERNAL_ERROR = -1;
 const int JVC_UNSAT_PREPROCESSED = -2;
 const int JVC_SUCCESS_SINGLE_FILE = 1;
-static const int SPLIT_COMPONENTS_THRESHOLD = 3; // If num components > this, split. (So 8 or less = single file)
+static const int SPLIT_COMPONENTS_THRESHOLD = 3; // 大于, split
+// 现在最好门限：3
 
 
-struct DSUComponentForVerilogOrder // Kept for reference or minor use
+struct DSUComponentForVerilogOrder
 {
     size_t size_metric;
     std::vector<std::string> wire_names_in_component;
@@ -104,43 +102,39 @@ struct EvaluatedConstant
                                              : (1ULL << ec.bit_width) - 1;
                     ec.is_all_ones = (num_val == all_ones_mask);
                 }
-                else if (ec.bit_width == 0) // Should not happen due to check above
+                else if (ec.bit_width == 0) 
                     return std::nullopt;
 
-                // Fix for 1-bit constants
                 if (ec.bit_width == 1 && num_val == 1)
                     ec.is_all_ones = true;
                 if (ec.bit_width == 1 && num_val == 0)
-                    ec.is_zero = true; // Already set, but explicit
+                    ec.is_zero = true;
                 
                 return ec;
             }
-            else // Decimal number without '
+            else
             {
                 if (s.find_first_not_of("0123456789") != std::string::npos || s.empty())
                     return std::nullopt;
                 ec.value = std::stoll(s);
                 ec.is_zero = (ec.value == 0);
-                // Sized literals like 32'd10 become "10" if no explicit size
-                // Default Verilog literal size is 32 bits
+
                 if (ec.value == 1) {
-                    ec.bit_width = 1; // Typically, '1' is 1'b1 unless context forces wider
+                    ec.bit_width = 1; 
                     ec.is_all_ones = true;
                 } else if (ec.value == 0) {
-                     ec.bit_width = 1; // same for 0
+                     ec.bit_width = 1;
                 }
                 else {
-                     ec.bit_width = 32; // Default for unsized decimal numbers in Verilog
+                     ec.bit_width = 32; 
                 }
                 return ec;
             }
         }
         catch (const std::exception &e)
         {
-            // cerr << "Exception in EvaluatedConstant: " << e.what() << " for string " << s << endl;
             return std::nullopt;
         }
-        // Should not be reached if logic is correct
         return std::nullopt;
     }
 };
@@ -148,21 +142,20 @@ struct EvaluatedConstant
 struct ExpressionDetail
 {
     string verilog_expr_str;
-    std::set<int> variable_ids; // 0-indexed IDs corresponding to original var list
+    std::set<int> variable_ids;
     std::optional<bool> const_expr_evaluates_to_nonzero;
 };
 
 struct ConstraintInternalInfo
 {
     string verilog_expression_body;
-    std::set<int> variable_ids; // 0-indexed IDs
+    std::set<int> variable_ids;
     string assigned_wire_name;
-    int original_json_constraint_index; // -1 for divisor constraints
-    int original_overall_idx;           // Unique index among all_constraints_info_orig
-    std::optional<bool> determined_wire_value; // true if 1, false if 0
+    int original_json_constraint_index;
+    int original_overall_idx;
+    std::optional<bool> determined_wire_value;
 };
 
-// Forward declaration
 static ExpressionDetail get_expression_details(
     const json &node,
     std::map<std::string, ExpressionDetail> &all_divisors_map);
@@ -177,7 +170,7 @@ static ExpressionDetail get_expression_details(
 
     if (type == "VAR")
     {
-        int id = node.value("id", 0); // This ID is the index in the original JSON variable_list
+        int id = node.value("id", 0);
         current_detail.verilog_expr_str = "var_" + to_string(id);
         current_detail.variable_ids.insert(id);
     }
@@ -205,7 +198,6 @@ static ExpressionDetail get_expression_details(
         bool evaluated = false;
         if (lhs_detail.const_expr_evaluates_to_nonzero.has_value())
         {
-            // Attempt to evaluate if the operand is a constant
             std::optional<EvaluatedConstant> ec_lhs =
                 EvaluatedConstant::from_verilog_string(
                     lhs_detail.verilog_expr_str);
@@ -216,24 +208,16 @@ static ExpressionDetail get_expression_details(
                     current_detail.verilog_expr_str = (ec_lhs->is_zero) ? "1'b1" : "1'b0";
                     evaluated = true;
                 }
-                // BIT_NEG and MINUS on constants are not simplified to 1'b0/1'b1 here,
-                // just their expression string is formed. We only care about zero/non-zero for const_expr_evaluates_to_nonzero.
-                // For BIT_NEG: ~0 is non-zero (all ones). ~non-zero can be zero or non-zero.
-                // Example: ~1'b1 = 1'b0 (zero). ~2'b10 = 2'b01 (non-zero).
-                // This needs more careful handling if we want to propagate BIT_NEG results.
-                // For now, LOG_NEG is the main one for boolean constant propagation.
             }
         }
         
         if (!evaluated) {
             current_detail.verilog_expr_str =
                 op_symbol_default + "(" + lhs_detail.verilog_expr_str + ")";
-            // For BIT_NEG and MINUS, if lhs was constant, we don't know if result is zero/non-zero without full eval
-            // unless it was LOG_NEG.
             if (type != "LOG_NEG") current_detail.const_expr_evaluates_to_nonzero = std::nullopt;
         }
     }
-    else // Binary operations
+    else 
     {
         ExpressionDetail lhs_detail =
             get_expression_details(node["lhs_expression"], all_divisors_map);
@@ -246,16 +230,11 @@ static ExpressionDetail get_expression_details(
 
         if (type == "DIV" || type == "MOD")
         {
-            // If RHS is not a provably non-zero constant, add it as a divisor constraint
             if (rhs_detail.const_expr_evaluates_to_nonzero.has_value()) {
-                if (!rhs_detail.const_expr_evaluates_to_nonzero.value()) { // RHS is constant zero
-                    // Division by zero! This expression is problematic.
-                    // For now, we'll add it to divisors_map, which implies (rhs != 0)
-                    // This will lead to an unsatisfiable (divisor_expr != 0) constraint.
+                if (!rhs_detail.const_expr_evaluates_to_nonzero.value()) { 
                      all_divisors_map[rhs_detail.verilog_expr_str] = rhs_detail;
                 }
-                // If RHS is const non-zero, no divisor constraint needed for it.
-            } else { // RHS is not a constant or its value is unknown
+            } else {
                  all_divisors_map[rhs_detail.verilog_expr_str] = rhs_detail;
             }
         }
@@ -268,18 +247,18 @@ static ExpressionDetail get_expression_details(
             std::optional<EvaluatedConstant> ec_rhs = EvaluatedConstant::from_verilog_string(rhs_detail.verilog_expr_str);
 
             if (ec_lhs.has_value() && ec_rhs.has_value()) {
-                bool result_is_nonzero = false; // temp
-                bool evaluable = true; // Can we evaluate this op to a simple boolean?
+                bool result_is_nonzero = false; 
+                bool evaluable = true;
                 if (type == "EQ") result_is_nonzero = (ec_lhs->value == ec_rhs->value);
                 else if (type == "NEQ") result_is_nonzero = (ec_lhs->value != ec_rhs->value);
                 else if (type == "LOG_AND") result_is_nonzero = (!ec_lhs->is_zero && !ec_rhs->is_zero);
                 else if (type == "LOG_OR") result_is_nonzero = (!ec_lhs->is_zero || !ec_rhs->is_zero);
-                // LT, LTE, GT, GTE for constants
+                
                 else if (type == "LT") result_is_nonzero = (ec_lhs->value < ec_rhs->value);
                 else if (type == "LTE") result_is_nonzero = (ec_lhs->value <= ec_rhs->value);
                 else if (type == "GT") result_is_nonzero = (ec_lhs->value > ec_rhs->value);
                 else if (type == "GTE") result_is_nonzero = (ec_lhs->value >= ec_rhs->value);
-                else evaluable = false; // Other ops (ADD, SUB, etc.) don't directly yield a boolean for this logic
+                else evaluable = false;
 
                 if (evaluable) {
                     current_detail.const_expr_evaluates_to_nonzero = result_is_nonzero;
@@ -290,7 +269,7 @@ static ExpressionDetail get_expression_details(
         }
 
         if (!evaluated_binary_const) {
-            current_detail.const_expr_evaluates_to_nonzero = std::nullopt; // Can't be sure
+            current_detail.const_expr_evaluates_to_nonzero = std::nullopt;
             string op_symbol;
             if (type == "IMPLY") {
                  current_detail.verilog_expr_str =
@@ -312,11 +291,11 @@ static ExpressionDetail get_expression_details(
                 else if (type == "EQ") op_symbol = "==";
                 else if (type == "NEQ") op_symbol = "!=";
                 else if (type == "LT") op_symbol = "<";
-                else if (type == "LTE") op_symbol = "<="; // Fixed typo: == to =
-                else if (type == "GT") op_symbol = ">";   // Fixed typo: == to =
-                else if (type == "GTE") op_symbol = ">=";  // Fixed typo: == to =
+                else if (type == "LTE") op_symbol = "<=";
+                else if (type == "GT") op_symbol = ">";  
+                else if (type == "GTE") op_symbol = ">=";  
                 else {
-                    current_detail.verilog_expr_str = "/* UNHANDLED_OP_STR: " + type + " */ 1'b1"; // Default to true to avoid false UNSAT
+                    current_detail.verilog_expr_str = "/* UNHANDLED_OP_STR: " + type + " */ 1'b1"; 
                     return current_detail;
                 }
                 current_detail.verilog_expr_str =
@@ -329,16 +308,15 @@ static ExpressionDetail get_expression_details(
 }
 
 
-// New struct for DSU-based component generation
 struct ComponentGenerationInfo {
     std::vector<ConstraintInternalInfo> constraints_in_group;
-    std::set<int> variable_ids_in_group; // 0-indexed IDs from original variable_list
-    json component_specific_variable_list_json; // For the component's own mini-JSON
-    std::vector<std::string> original_variable_names_in_group; // For mapping file
+    std::set<int> variable_ids_in_group; 
+    json component_specific_variable_list_json; 
+    std::vector<std::string> original_variable_names_in_group; 
     int component_id_num;
 };
 
-// New DSU analysis function
+
 static std::vector<ComponentGenerationInfo> group_constraints_by_dsu(
     const std::vector<ConstraintInternalInfo>& effective_constraints,
     const json& original_variable_list_json) 
@@ -400,7 +378,6 @@ static std::vector<ComponentGenerationInfo> group_constraints_by_dsu(
 
         comp_info.component_specific_variable_list_json = json::array();
         for (int var_id : var_ids_for_this_comp) {
-            // var_id is the index into original_variable_list_json
             if (var_id < original_variable_list_json.size()) {
                  comp_info.component_specific_variable_list_json.push_back(original_variable_list_json[var_id]);
                  comp_info.original_variable_names_in_group.push_back(original_variable_list_json[var_id].value("name",""));
@@ -408,15 +385,15 @@ static std::vector<ComponentGenerationInfo> group_constraints_by_dsu(
         }
         component_groups.push_back(comp_info);
     }
-    // Sort components by size or some other metric if desired, e.g., smallest first
+
      std::sort(component_groups.begin(), component_groups.end(), 
         [](const ComponentGenerationInfo& a, const ComponentGenerationInfo& b){
             if (a.constraints_in_group.size() != b.constraints_in_group.size()) {
                 return a.constraints_in_group.size() < b.constraints_in_group.size();
             }
-            return a.component_id_num < b.component_id_num; // Fallback to original id
+            return a.component_id_num < b.component_id_num; 
         });
-    // Re-assign component_id_num after sorting
+    
     for(size_t i = 0; i < component_groups.size(); ++i) {
         component_groups[i].component_id_num = i;
     }
@@ -425,15 +402,14 @@ static std::vector<ComponentGenerationInfo> group_constraints_by_dsu(
 }
 
 
-// For single Verilog file generation - largely original logic but may need tweaks
+
 static std::vector<std::string> get_ordered_wires_for_single_verilog(
     const std::vector<ConstraintInternalInfo> &effective_constraints)
 {
     std::vector<std::string> final_ordered_wires;
     if (effective_constraints.empty()) return final_ordered_wires;
 
-    // This DSU is for ordering wires for a single output, not for splitting.
-    // The DSU logic from the original get_ordered_wires_by_dsu_strategy is fine here.
+
     int num_effective = effective_constraints.size();
     std::vector<int> dsu_parent(num_effective);
     std::iota(dsu_parent.begin(), dsu_parent.end(), 0);
@@ -462,11 +438,11 @@ static std::vector<std::string> get_ordered_wires_for_single_verilog(
         }
     }
     
-    struct DSUComponentForOrdering { // Local struct for sorting
+    struct DSUComponentForOrdering { 
         int root_representative_idx;
         size_t num_constraints;
         size_t total_pi_support_size;
-        size_t size_metric; // Heuristic for sorting components
+        size_t size_metric; 
         std::vector<int> effective_constraint_indices_in_component;
     };
 
@@ -488,13 +464,13 @@ static std::vector<std::string> get_ordered_wires_for_single_verilog(
                 effective_constraints[eff_idx].variable_ids.end());
         }
         comp.total_pi_support_size = component_pis.size();
-        comp.size_metric = comp.num_constraints; // Or use total_pi_support_size, or a mix
+        comp.size_metric = comp.num_constraints;
         component_list.push_back(comp);
     }
 
     std::sort(component_list.begin(), component_list.end(),
         [](const DSUComponentForOrdering &a, const DSUComponentForOrdering &b) {
-            if (a.size_metric != b.size_metric) return a.size_metric < b.size_metric; // Smallest first
+            if (a.size_metric != b.size_metric) return a.size_metric < b.size_metric; 
             return a.root_representative_idx < b.root_representative_idx;
         });
 
@@ -509,25 +485,25 @@ static std::vector<std::string> get_ordered_wires_for_single_verilog(
 
 int json_v_converter(const string &input_json_path,
                      const string &output_dir_for_files,
-                     string &base_file_name_for_outputs_no_ext, // Out param
-                     int *status_or_num_components)             // Out param
+                     string &base_file_name_for_outputs_no_ext,
+                     int *status_or_num_components)          
 {
-    *status_or_num_components = JVC_INTERNAL_ERROR; // Default to error
+    *status_or_num_components = JVC_INTERNAL_ERROR;
 
     json data;
     ifstream input_json_stream(input_json_path);
-    if (!input_json_stream.is_open()) return 1; // File error
+    if (!input_json_stream.is_open()) return 1;
     try {
         input_json_stream >> data;
     } catch (const json::parse_error &e) {
         input_json_stream.close();
-        return 1; // Parse error
+        return 1; 
     }
     input_json_stream.close();
 
     if (!data.contains("variable_list") || !data["variable_list"].is_array() ||
         !data.contains("constraint_list") || !data["constraint_list"].is_array()) {
-        return 1; // Format error
+        return 1; 
     }
 
     filesystem::path input_json_path_obj(input_json_path);
@@ -568,14 +544,12 @@ int json_v_converter(const string &input_json_path,
         const ExpressionDetail &div_detail = pair_str_detail.second;
         ConstraintInternalInfo info;
         string divisor_expr_str = div_detail.verilog_expr_str;
-        info.verilog_expression_body = "(" + divisor_expr_str + " != 0)"; // Constraint is "divisor must be non-zero"
+        info.verilog_expression_body = "(" + divisor_expr_str + " != 0)"; 
         info.variable_ids = div_detail.variable_ids;
-        info.assigned_wire_name = "cnstr" + to_string(current_idx_counter) + "_redor"; // Divisor constraint
-        info.original_json_constraint_index = -1; // Mark as divisor constraint
+        info.assigned_wire_name = "cnstr" + to_string(current_idx_counter) + "_redor"; 
+        info.original_json_constraint_index = -1;
         info.original_overall_idx = current_idx_counter;
         if (div_detail.const_expr_evaluates_to_nonzero.has_value()) {
-             // If divisor is const zero, (const_zero != 0) is false.
-             // If divisor is const non-zero, (const_non_zero != 0) is true.
             info.determined_wire_value = div_detail.const_expr_evaluates_to_nonzero.value();
         } else {
             info.determined_wire_value = std::nullopt;
@@ -594,8 +568,6 @@ int json_v_converter(const string &input_json_path,
 
     if (result_is_const_zero) {
         *status_or_num_components = JVC_UNSAT_PREPROCESSED;
-        // For consistency, still generate a Verilog file that outputs 0.
-        // The main orchestrator will handle the UNSAT status.
         vector<string> v_lines;
         v_lines.push_back("module from_json_const_zero(");
         v_lines.push_back("     output wire result");
@@ -606,33 +578,26 @@ int json_v_converter(const string &input_json_path,
         filesystem::path output_v_path = filesystem::path(output_dir_for_files) / (base_file_name_for_outputs_no_ext + ".v");
         ofstream output_v_stream(output_v_path);
         if (!output_v_stream.is_open()) {
-            *status_or_num_components = JVC_INTERNAL_ERROR; // Override, as file write failed
-            return 1; // Error
+            *status_or_num_components = JVC_INTERNAL_ERROR; 
+            return 1; 
         }
         for (const string &line : v_lines) output_v_stream << line << endl;
         output_v_stream.close();
-        return 0; // Success (even though UNSAT)
+        return 0; 
     }
 
     std::vector<ConstraintInternalInfo> effective_constraints_for_processing;
     for (const auto &info : all_constraints_info_orig) {
         if (!(info.determined_wire_value.has_value() && info.determined_wire_value.value())) {
-            // Include if not const 1'b1. Const 1'b0s were handled by result_is_const_zero.
-            // Or if it is const 1'b0, it should be included to make the product 0.
-            // Re-check: if result_is_const_zero is false, no constraint is const 1'b0.
-            // So effective_constraints only filters out const 1'b1.
             effective_constraints_for_processing.push_back(info);
         }
     }
     
-    // If all constraints were true or no constraints, result is true.
-    // effective_constraints_for_processing will be empty. group_constraints_by_dsu will return empty.
-    // This case is handled as a single component problem.
 
     std::vector<ComponentGenerationInfo> components = 
         group_constraints_by_dsu(effective_constraints_for_processing, variable_list_json);
 
-    if (components.size() <= SPLIT_COMPONENTS_THRESHOLD || components.empty()) { // Includes components.size() == 0 or 1
+    if (components.size() <= SPLIT_COMPONENTS_THRESHOLD || components.empty()) { 
         // --- SINGLE VERILOG FILE ---
         *status_or_num_components = JVC_SUCCESS_SINGLE_FILE;
         vector<string> v_lines;
@@ -641,10 +606,10 @@ int json_v_converter(const string &input_json_path,
         for (const auto &var_json : variable_list_json) {
             if (!var_json.contains("name") || !var_json["name"].is_string() ||
                 !var_json.contains("bit_width") || !var_json["bit_width"].is_number())
-                continue; // Skip malformed
+                continue; 
             string name = var_json.value("name", "default_var_name");
             int bit_width = var_json.value("bit_width", 1);
-            if (!first_var) v_lines.back() += ","; // Add comma to previous line
+            if (!first_var) v_lines.back() += ",";
             v_lines.push_back("     input wire [" + to_string(max(0, bit_width - 1)) + ":0] " + name);
             first_var = false;
         }
@@ -652,7 +617,7 @@ int json_v_converter(const string &input_json_path,
         v_lines.push_back("     output wire result");
         v_lines.push_back(");");
 
-        for (const auto &info : all_constraints_info_orig) { // Declare all original wires
+        for (const auto &info : all_constraints_info_orig) {
             v_lines.push_back("     wire " + info.assigned_wire_name + ";");
             if (info.determined_wire_value.has_value()) {
                 v_lines.push_back("     assign " + info.assigned_wire_name + " = " +
@@ -666,7 +631,7 @@ int json_v_converter(const string &input_json_path,
             get_ordered_wires_for_single_verilog(effective_constraints_for_processing);
 
         string result_assign = "     assign result = ";
-        if (final_ordered_result_wire_names.empty()) { // All constraints were const true, or no effective constraints
+        if (final_ordered_result_wire_names.empty()) { 
             result_assign += "1'b1;";
         } else {
             for (size_t i = 0; i < final_ordered_result_wire_names.size(); ++i) {
@@ -697,7 +662,6 @@ int json_v_converter(const string &input_json_path,
             int comp_idx = comp_gen_info.component_id_num;
             string comp_base_name = base_file_name_for_outputs_no_ext + "_comp_" + to_string(comp_idx);
 
-            // Write mini-JSON for this component's variable list
             json comp_mini_json;
             comp_mini_json["variable_list"] = comp_gen_info.component_specific_variable_list_json;
             filesystem::path comp_json_path = filesystem::path(output_dir_for_files) / (comp_base_name + ".json");
@@ -706,7 +670,6 @@ int json_v_converter(const string &input_json_path,
             comp_json_stream << comp_mini_json.dump(4) << endl;
             comp_json_stream.close();
 
-            // Generate Verilog for this component
             vector<string> v_lines_comp;
             string module_name = "from_json_comp_" + to_string(comp_idx);
             v_lines_comp.push_back("module " + module_name + "(");
@@ -736,7 +699,7 @@ int json_v_converter(const string &input_json_path,
             
             string comp_result_assign = "    assign result_comp_" + to_string(comp_idx) + " = ";
             if (comp_constraint_wire_names.empty()) {
-                comp_result_assign += "1'b1;"; // Component is trivially true
+                comp_result_assign += "1'b1;"; 
             } else {
                 for (size_t i = 0; i < comp_constraint_wire_names.size(); ++i) {
                     comp_result_assign += comp_constraint_wire_names[i];
@@ -752,7 +715,6 @@ int json_v_converter(const string &input_json_path,
             for (const string &line : v_lines_comp) comp_v_stream << line << endl;
             comp_v_stream.close();
 
-            // Add to mapping JSON
             json comp_map_entry;
             comp_map_entry["component_id"] = comp_idx;
             comp_map_entry["verilog_file"] = comp_base_name + ".v";

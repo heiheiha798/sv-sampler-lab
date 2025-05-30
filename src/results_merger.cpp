@@ -7,9 +7,9 @@
 #include <map>
 #include <set>
 #include <algorithm>
-#include <random> // For random selection if needed, or shuffling indices
-#include <cmath>  // For ceil in sample count calculation (though samples_per_component is decided by main)
-#include <filesystem> // For path operations
+#include <random> 
+#include <cmath>  
+#include <filesystem> 
 
 using json = nlohmann::json;
 using namespace std;
@@ -36,7 +36,6 @@ bool load_mapping_file(const std::string& mapping_json_path, MappingFileContents
         return false;
     }
     contents.original_variable_list_json = mapping_data["original_variable_list"];
-    // contents.num_total_samples_requested = mapping_data.value("num_total_samples_requested", 0); // If stored here
 
     for (const auto& comp_json : mapping_data["components"]) {
         ComponentMappingInfo info;
@@ -55,7 +54,6 @@ bool load_mapping_file(const std::string& mapping_json_path, MappingFileContents
         }
         contents.components.push_back(info);
     }
-    // Sort components by ID to ensure consistent processing order
     std::sort(contents.components.begin(), contents.components.end(), 
         [](const ComponentMappingInfo& a, const ComponentMappingInfo& b){
             return a.component_id < b.component_id;
@@ -75,7 +73,7 @@ int merge_results(const std::string& mapping_json_path,
         return 1; // Error loading/parsing mapping file
     }
 
-    std::vector<json> component_assignment_lists; // Each element is an assignment_list (array of samples) for a component
+    std::vector<json> component_assignment_lists;
     std::vector<size_t> num_samples_per_component;
 
     for (const auto& comp_map_entry : mapping_info.components) {
@@ -83,8 +81,6 @@ int merge_results(const std::string& mapping_json_path,
         std::ifstream comp_result_ifs(comp_result_path);
         if (!comp_result_ifs.is_open()) {
             std::cerr << "Error: Cannot open component result file: " << comp_result_path << std::endl;
-            // This implies overall UNSAT or an error in the pipeline before merger
-            // For now, assume UNSAT and write empty list.
             json final_result_json;
             final_result_json["assignment_list"] = json::array();
             std::ofstream ofs(final_output_json_path);
@@ -124,19 +120,14 @@ int merge_results(const std::string& mapping_json_path,
     }
 
     if (component_assignment_lists.empty() && !mapping_info.components.empty()) {
-        // This case should be caught by individual component checks, but as a safeguard:
-        // If there were supposed to be components but we have no assignment lists, something is wrong.
-        // If mapping_info.components was also empty, it's a trivial SAT (handled by JVC usually).
         std::cerr << "Warning: No component assignment lists loaded, but components were expected." << std::endl;
     }
     
-    if (mapping_info.components.empty()) { // No components to merge, means original problem was trivial SAT
+    if (mapping_info.components.empty()) {
         json final_result_json;
-        final_result_json["assignment_list"] = json::array(); // Typically one empty assignment for "always true"
-                                                            // Or specific format if needed.
-                                                            // For now, an empty list of assignments means SAT if no constraints.
-                                                            // If there were variables, one assignment of all zeros might be expected.
-                                                            // But this case should be handled by json_v_converter producing a single trivial file.
+        final_result_json["assignment_list"] = json::array(); 
+
+
         std::ofstream ofs(final_output_json_path);
         ofs << final_result_json.dump(4) << std::endl;
         ofs.close();
@@ -148,14 +139,11 @@ int merge_results(const std::string& mapping_json_path,
     std::set<std::string> unique_full_assignment_signatures;
     
     std::vector<size_t> current_indices(component_assignment_lists.size(), 0);
-    std::mt19937 rng(random_seed_for_merging); // For shuffling or random picking if needed
-
-    // To get diverse samples, we can iterate through combinations systematically
-    // or pick component samples randomly. Systematic iteration is simpler first.
+    std::mt19937 rng(random_seed_for_merging); 
 
     long long total_possible_combinations = 1;
     for(size_t count : num_samples_per_component) {
-        if (count == 0) { // Should have been caught by UNSAT check above
+        if (count == 0) { 
             total_possible_combinations = 0;
             break;
         }
@@ -167,8 +155,6 @@ int merge_results(const std::string& mapping_json_path,
     }
     
     if (total_possible_combinations == 0 && !component_assignment_lists.empty()) {
-         // This means some component had 0 samples, should be caught by UNSAT logic.
-         // Writing empty assignment list as a fallback.
         json final_result_json;
         final_result_json["assignment_list"] = json::array();
         std::ofstream ofs(final_output_json_path);
@@ -189,10 +175,9 @@ int merge_results(const std::string& mapping_json_path,
             const json& samples_for_this_comp = component_assignment_lists[comp_i];
             size_t sample_idx_for_comp = current_indices[comp_i];
             
-            const json& one_sample_from_comp = samples_for_this_comp[sample_idx_for_comp]; // This is an array of {"value": "hex"}
+            const json& one_sample_from_comp = samples_for_this_comp[sample_idx_for_comp]; 
 
-            // The one_sample_from_comp array corresponds to variables in comp_map_entry.variable_names
-            // AND ALSO to variables in that component's mini-JSON variable_list.
+
             if (one_sample_from_comp.size() != comp_map_entry.variable_names.size()) {
                  std::cerr << "Mismatch in variable count for component " << comp_map_entry.component_id << std::endl;
                  return 1; // Data integrity error
@@ -204,20 +189,15 @@ int merge_results(const std::string& mapping_json_path,
             }
         }
 
-        // Construct the final JSON entry based on original_variable_list order
         json one_final_assignment_entry = json::array();
         for (const auto& orig_var_json : mapping_info.original_variable_list_json) {
             std::string orig_var_name = orig_var_json.value("name", "");
             int bit_width = orig_var_json.value("bit_width",1);
-            std::string val_hex = "0"; // Default if var not in any component (should not happen for constrained vars)
+            std::string val_hex = "0"; 
             if (current_full_assignment_map.count(orig_var_name)) {
                 val_hex = current_full_assignment_map[orig_var_name];
             } else {
-                // If a variable from original_variable_list was not in any component,
-                // it means it was not part of any constraint. Assign default (e.g., 0).
-                // This requires to_hex_string to be available or use a pre-formatted zero.
-                // For simplicity, use "0", but proper hex width might be desired.
-                // val_hex = to_hex_string(0, bit_width); // if to_hex_string is linkable here
+                // NoNeed
             }
             one_final_assignment_entry.push_back({{"value", val_hex}});
         }
@@ -228,15 +208,14 @@ int merge_results(const std::string& mapping_json_path,
             generated_count++;
         }
 
-        // Advance current_indices (like incrementing a mixed-radix number)
         int k_radix = 0;
         while(k_radix < current_indices.size()){
             current_indices[k_radix]++;
-            if(current_indices[k_radix] < num_samples_per_component[k_radix]) break; // No carry
-            current_indices[k_radix] = 0; // Reset and carry
+            if(current_indices[k_radix] < num_samples_per_component[k_radix]) break; 
+            current_indices[k_radix] = 0; 
             k_radix++;
         }
-        if(k_radix == current_indices.size()) break; // All combinations exhausted
+        if(k_radix == current_indices.size()) break; 
 
         combinations_tried++;
     }

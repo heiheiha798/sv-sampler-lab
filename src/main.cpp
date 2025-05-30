@@ -2,11 +2,11 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <cstdlib>            // For system()
-#include <cmath>              // For ceil, pow
-#include <fstream>            // For ifstream, ofstream
-#include "solver_functions.h" // Includes JVC_ constants
-#include "nlohmann/json.hpp"  // For quickly writing UNSAT result
+#include <cstdlib>      
+#include <cmath>            
+#include <fstream>          
+#include "solver_functions.h"
+#include "nlohmann/json.hpp" 
 
 using namespace std;
 using namespace std::filesystem;
@@ -134,12 +134,11 @@ int main(int argc, char *argv[])
             {
                 return 1;
             }
-            // For single file, aig_to_bdd_solver writes directly to final_result_json_path
             return aig_to_bdd_solver(aig_file.string(), constraint_json_abs_str, num_total_samples,
                                      final_result_json_path.string(), random_seed);
         }
         else
-        { // jvc_status_or_num_comp = k > 1 (split)
+        { 
             int num_components = jvc_status_or_num_comp;
             cout << "json_v_converter produced " << num_components << " component Verilog files." << endl;
 
@@ -153,7 +152,6 @@ int main(int argc, char *argv[])
 
             map_contents.num_total_samples_requested = num_total_samples;
 
-            // 新的动态采样策略
             vector<int> samples_per_component_list(num_components);
             if (num_total_samples == 0) {
                 // 如果总采样数为0，所有组件都采样0次
@@ -182,14 +180,7 @@ int main(int argc, char *argv[])
                         remaining_components--;
                     }
                 }
-            }
-
-            cout << "Dynamic sampling strategy: ";
-            for (int i = 0; i < num_components; ++i) {
-                cout << "Component " << i << ": " << samples_per_component_list[i] << " samples";
-                if (i < num_components - 1) cout << ", ";
-            }
-            cout << endl;
+            }                
 
             bool any_component_unsat = false;
             bool break_early_on_unsat = true;
@@ -241,8 +232,7 @@ int main(int argc, char *argv[])
                     } catch (const json::parse_error& e) {
                         cerr << "Warning: Could not parse result file for component " << comp_info.component_id 
                              << ": " << comp_result_json.string() << " (" << e.what() << "). Assuming not UNSAT for now." << endl;
-                        // Decide how to handle parse error - treat as error or non-UNSAT?
-                        // For now, let's not assume it's UNSAT if we can't parse it.
+      
                     }
                     comp_res_ifs.close();
                 } else {
