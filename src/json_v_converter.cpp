@@ -19,8 +19,8 @@ using namespace std::filesystem;
 const int JVC_INTERNAL_ERROR = -1;
 const int JVC_UNSAT_PREPROCESSED = -2;
 const int JVC_SUCCESS_SINGLE_FILE = 1;
-static const int SPLIT_COMPONENTS_THRESHOLD = 3; // 大于, split
-// 现在最好门限：3
+static const int SPLIT_COMPONENTS_THRESHOLD = 1; // 大于, split
+// 现在最好门限：1
 
 
 struct DSUComponentForVerilogOrder
